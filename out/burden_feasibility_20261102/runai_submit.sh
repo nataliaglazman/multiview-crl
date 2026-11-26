@@ -4,7 +4,7 @@
 #   bash out/burden_feasibility_20261102/runai_submit.sh --dry-run [STAGE...]
 #   bash out/burden_feasibility_20261102/runai_submit.sh [STAGE...]
 # Set any of ADNI_DATA, ADNI_LABELS, ADNI_MASKS, ADNI_SPLIT, WHEELS and PYTHONUSERBASE (stage 68) or WIDTH_SEEDS,
-# WIDTH_UNITS, WIDTH_PARALLEL and WIDTH_WAIT_BANK (stage 74) to pass them to the job.
+# WIDTH_UNITS, WIDTH_PARALLEL and WIDTH_WAIT_BANK (stages 74 and 79) to pass them to the job.
 # Resources: RUNAI_PROJECT, RUNAI_IMAGE, RUNAI_NODE_TYPE, RUNAI_CPU, RUNAI_CPU_LIMIT, RUNAI_MEMORY, RUNAI_MEMORY_LIMIT.
 # Progress: out/burden_feasibility_20261102/adni/runai.log in the checkout, then the stage's own logs.
 set -euo pipefail

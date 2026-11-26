@@ -171,11 +171,14 @@ training runs.
 
 ### E0. Housekeeping and freeze (P0, no training, about a day)
 
-- **Copy the unsaved burden analyses into the repo today.** EVIDENCE.md B2–B5, B11 and B12 rest on scripts that exist
-  only in a session scratchpad, which a reboot clears:
-  `/private/tmp/claude-502/-Users-nataliaglazman-Desktop-PhD-projects-multiview-crl/77e32499-5c1e-4c8e-9d77-1bf404f016d1/scratchpad/`
-  (`rank_rule/{rank_check,analyse,rank_dirs}.py` with their JSONs, `shared_error/{shared_error,summarise}.py` with
-  JSONs, `squash_check.py`). Destination: `out/burden_feasibility_20261102/`. E2b needs `rank_check.py`.
+- **Copy the unsaved burden analyses into the repo.** Done 26 Nov 2026 (checksums match the scratchpad). The scripts
+  and outputs behind EVIDENCE.md B1–B5, B11 and B12 are in `out/burden_feasibility_20261102/`:
+  - `rank_rule/`: `rank_check`, `analyse` and `rank_dirs` with their JSONs, plus `rule_test.py`, `price_threshold.py`
+    and `pc/` (the stage 33/35/38 report copies that `rule_test.py` reads);
+  - `shared_error/`: `shared_error` and `summarise` with their JSONs;
+  - `squash_check.py`.
+
+  `.gitignore` excludes the JSONs and `scm_draws.npy`. E2b needs `rank_rule/rank_check.py`.
 - Read stage 60 by its pre-set rules when it finishes.
 - Run stage 67's `export` once, so every no-training analysis reads `causal/codes/<run>.npz`.
 - Write the frozen recipe and the reading rules of E1–E8 into HANDOFF section 10 and start the new EVIDENCE.md
@@ -267,6 +270,11 @@ training runs.
 
 ### E-W. Setting the width on real data (P0 for ADNI; about 12 PC arms and 6 ADNI runs)
 
+- **Status 26 Nov (fixed causal bank only, stage 74's 27 codes; HANDOFF items 63–64).** Rule 1 (loss elbow) fails:
+  16 against 8. Rule 2 (TwoNN + the bank's offset) passes: 8, every seed 8. Rule 3 (retrieval within 5% of the range)
+  passes on the mean (8) but not per seed (7, 6, 6). Still needed: the fixed independent and drawn causal sweeps. The
+  drawn bank decides whether rule 2's offset, which ADNI would have to borrow, holds at |C| 10. The drawn-bank sweep is built as
+  stage 79 (27 runs, Run:ai; HANDOFF section 9); the fixed independent bank's is not built.
 - **Problem.** Matched width needs `|C|`. ADNI does not give it.
 - **Candidate label-free rules, fixed before any result:**
   1. the elbow of the held-out loss over a width sweep (Daunhawer et al.'s practice, per the 20 Nov note);

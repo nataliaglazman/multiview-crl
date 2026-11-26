@@ -108,7 +108,15 @@ bash out/burden_feasibility_20261102/runai_submit.sh --dry-run
   `adni/logs/<run>.log`. A resubmit skips finished steps, but restarts an unfinished training run from step 0.
 - **Stage 73** (once stage 68 has finished): `bash out/burden_feasibility_20261102/runai_submit.sh 73`, after a
   `--dry-run`. It needs no ADNI paths and no SimpleITK. Its three runs share the A100; expect about 3 hours (one
-  20,000-step run alone took 2).
+  20,000-step run alone took 2). Ran 25 Nov 12:32–16:04 (0.58–0.63 s/step with two training runs on one A100); read
+  26 Nov, section 10.
+- **Stage 79** (built 26 Nov, not submitted): stage 74's sweep on the drawn causal bank. Commit and push, pull on the
+  cluster checkout, then one job per seed and a final scoring job, each after a `--dry-run`:
+  `WIDTH_SEEDS=42 JOB_NAME=burden-s79-width-s42 bash out/burden_feasibility_20261102/runai_submit.sh 79`; then the same
+  with `WIDTH_SEEDS=3` and `WIDTH_SEEDS=4`, each with `WIDTH_WAIT_BANK=1` (the first job renders
+  `bank_causal_nofield` and its residuals unless that bank is copied to the cluster first, as the fixed bank was);
+  when all 27 runs log DONE, `JOB_NAME=burden-s79-score bash out/burden_feasibility_20261102/runai_submit.sh 79`.
+  Nine runs a job, five at a time: about 4–5 hours a job at stage 74's pace, plus the render.
 
 ### Locally (Mac)
 
@@ -229,6 +237,8 @@ bash out/burden_feasibility_20261102/runai_submit.sh --dry-run
     the loss's code), `running_jittered`, and `recalibrated` (a copy of the pool whose gauge is recomputed from all
     clean training images, the network frozen). The last two also give top-1 among all and the modality probes. None
     changes the run: `tests/test_warm_readouts.py`. The jitter repeats exactly at every eval.
+  - Stage 73 (read 26 Nov, section 10): read `recalibrated`. The plain row reads the code through the gauge's stored
+    statistics, which can be far off (top-1 .831 plain against .953 recalibrated on the same checkpoint).
   - `--keep-checkpoints` keeps `model_STEP.pt` at every eval. `--init-run RUN/model.pt` with 0 steps evaluates a
     finished run once (its row is labelled with the checkpoint in `summarize.py`).
   - Older levers: `--queue`, `--gauge running`, `--group-dropout`, `--decorrelate`, `--shared-jitter`, `--uniform`.
@@ -244,6 +254,9 @@ bash out/burden_feasibility_20261102/runai_submit.sh --dry-run
 | `own_variation.py` | causal bank only: each factor's **own variation** (its SCM noise) read from the code, the pooled features and the GAP, trained vs untrained twin, with reference columns. `--boosted` adds the code read by gradient boosting beside the true factors read the same way: ridge reads only what a code holds linearly |
 | `bottleneck_check.py` | no training: fresh 10- and 24-unit bottlenecks fitted on a run's frozen features to predict the other view's whitened GAP through a linear or an MLP map, read like a code (volume error, alone, anatomy and position by ridge and boosting, each factor too). `--targets gap tails pooled` also predicts the other view's tail features or its whole pooled vector; `--heads 512 512x2` tries wider or deeper heads than TailCode's (one hidden layer of 100). Stages 36, 39 and 40 |
 | `style_audit.py` | each view's gain, bias and noise level read from the code, pooled features and GAP, trained vs untrained twin, against the other view's (drawn independently: the null). Banks don't store style, so it is redrawn from the generator's seeds and must reproduce the stored content latents. `code_audit.py` scores no style |
+| `width_sweep.py` | stage 74: `measure` (GPU) each run's held-out InfoNCE on test subjects and own-part R² from its exported code; `score` (no torch) the elbow of the mean loss over widths against \|C\| + 1, own-part saturation width, figure (skipped without matplotlib). Item 63 |
+| `spare_units.py` | no torch: where a code's whitened directions go as width grows (own parts linearly, curves of the factors by boosting, shared outside the factors, view-private), and which factors the directions past the seventh are curves of. Item 63 |
+| `width_rules.py` | no torch: E-W's rules 2 (TwoNN of the widest code plus the bank's offset from its true latents) and 3 (smallest width with top-1 among all within 5% of the range below the widest's) on a width sweep's exports, with the rules' numbers in its docstring. `--self-test`. Item 64 |
 | `precision_audit.py` | the lesion-volume reading error in voxels at each stage (image filter on the residual, backbone map, GAP, pooled features, code), with the anatomy part handed to the readout; error by lesion size, error shared by the views, and the loss's reward for a sharper reading, also with lesion position and/or anatomy removed from the code. `--jitter-draws K` reads test scans moved by the run's training jitter (mean over K moves), `--split train` reads training subjects, and `precision_compare.py` puts conditions side by side. Two "weighted" price rows refit the critic to each code (one weight per unit inside the cosine; as trained, and with position and anatomy removed); rerunning the audit on a stored JSON adds them without redoing the rest |
 | `cca_readout.py` | CCA codes (top 14 or 24 canonical directions between T1 and FLAIR features, fitted on training subjects) from the pooled features and GAP, scored the same way; writes bundles |
 | `causal_bundle.py` + `causal()` | label-free (`eval.causal.latent_causal_discovery`) and decoded (`eval.protocol.compare_bundles --with-graph`) discovery against the true graph |
@@ -1979,6 +1992,95 @@ bash out/burden_feasibility_20261102/runai_submit.sh --dry-run
       that meets the rule; that would be a new calibration, recorded before any sufficiency run.
     - **No sufficiency run was made**, so nothing here argues for or against the term.
 
+63. **The content-size elbow overshoots |C| + 1: the held-out loss keeps falling to 16 units, paid for by curved
+    functions of the seven factors, not by style or new content (stage 74, read 26 Nov 11:15,
+    `causal/stage74/width_sweep.txt`, `style_audit.txt`, `spare_units.txt`).** Daunhawer et al.'s App. B.2 sweep on
+    the fixed-position bank (7 shared latents, so |C| + 1 = 8): stage 56's recipe at widths 4, 5, 6, 7, 8, 9, 10, 12
+    and 16 × seeds 42, 3, 4, 27 runs on Run:ai A100s.
+    - **Against the rule fixed before the results (E-W): FAIL.** The elbow (smallest width within 5% of the total
+      drop above the minimum of the mean held-out InfoNCE) is 16; per seed 16, 12, 16.
+    - **The labelled reference lands on the theory.** Mean own-part R² rises to .78 at 8 units and stops (k_own 8);
+      the weakest factor (burden) reads .56 at 8, .61 at 16.
+      - The loss is not monotone: 7 units (2.01) sit above 6 (1.87) and 10 (1.91) above 9 (1.68).
+      - Its seed SD at 9 and 12 (.38, .41) is as large as the steps between widths.
+      - Below 8, the loss flattens at 5–6 units while burden, sulcal and ventricle are still missing (they arrive at
+        7–8).
+
+      | units | held-out loss | own mean | weakest |
+      |---|---|---|---|
+      | 4 | 4.57 ± 1.41 | .33 | .02 |
+      | 6 | 1.87 ± .20 | .59 | .08 |
+      | 8 | 1.71 ± .14 | .78 | .56 |
+      | 10 | 1.91 ± .19 | .73 | .56 |
+      | 12 | 1.32 ± .41 | .77 | .62 |
+      | 16 | .76 ± .11 | .75 | .61 |
+    - **No style at any width.** Each view's gain, bias and noise read 0.00 from the trained code at every width,
+      linearly and by boosting. The untrained twin's code reads gain .16 at 4 units, rising to .41 at 16. The pooled
+      features still hold gain (~.8); none reaches the code.
+    - **Where the directions go** (`spare_units.py`: each code whitened so every direction counts alike, each
+      direction's variance split by 5-fold fits; mean over 3 seeds × 2 views):
+
+      | units | own parts (linear) | curves of the factors | shared outside the factors | view-private |
+      |---|---|---|---|---|
+      | 4 | 2.33 | .86 | .01 | .80 |
+      | 8 | 5.48 | 1.74 | .13 | .66 |
+      | 10 | 5.04 | 3.59 | .23 | 1.13 |
+      | 12 | 5.32 | 4.72 | .40 | 1.57 |
+      | 16 | 5.17 | 7.50 | .76 | 2.58 |
+      - The own parts stop at about 5.3 directions from 8 units on.
+      - Every direction past the seventh reads 0 from the own parts and about .75 by boosting from the seven factors.
+        The 8-unit code's eighth direction is already all curve (.97).
+      - **They are not single-factor harmonics** (unlike stage 56's bent copy of brain size, item 46). Over the 84
+        directions past the seventh in the 12- and 16-unit codes, by boosting:
+        - one factor reads a median .07 (quartiles −.01–.17);
+        - the best pair .30 (.17–.43), most often brain + lr (34), brain + temporal (16), thickness + temporal (10);
+        - all seven .75 (.70–.79).
+        So each is a joint non-linear function of several factors.
+      - Shared content outside the factors stays small (.76 of 16 directions). The fixed bank's residual lesion-position
+        jitter (SD 2.7 voxels) is a candidate. Its latent is not in the exported codes, so this is untested.
+    - **Reading.**
+      - InfoNCE rewards telling subjects apart, and a curved function of known factors separates subjects that the
+        linear directions leave close. So the loss cannot tell a new factor from finer resolution of known ones, and
+        a label-free width elbow overshoots |C| + 1 on images.
+      - This agrees with Yao's guarantee: the code is an invertible, not a linear, function of the content block.
+      - The spare directions are multi-factor interactions, so a single-factor harmonic penalty (item 54) would not
+        catch them.
+      - Matched width stays the paper's width (24 Nov); this sweep is evidence for fixing it from the theory rather
+        than by the loss.
+    - **Running it.**
+      - The jobs: `runai_submit.sh 74`, one job per seed (`WIDTH_SEEDS=...`), then one default job to score all.
+      - Two fixes were needed after training. `21e8a25`: `needs_done` demanded causal-learn, which the image lacks
+        (`NEEDS_CAUSAL=0` for stage 74). `482d1ce`: score skips the figure without matplotlib. Draw the figure
+        locally with `width_sweep.py score ... --figure`.
+      - `spare_units.py` ran locally on the 27 exports copied from the cluster's `causal/codes/`. The exports now sit
+        in `causal/stage74/codes/` (gitignored; copied from a session scratchpad 26 Nov).
+
+64. **E-W's other two width rules both land on |C| + 1 = 8 on the fixed causal bank: the intrinsic dimension
+    cleanly, retrieval only on the mean (stage 74's codes, no training; read 26 Nov, `causal/stage74/width_rules.txt`,
+    `width_rules.py`).** The plan named these rules without numbers; `width_rules.py`'s docstring fixed them before
+    either was computed on any stage 74 code. A rule passes on a bank if it lands within one unit of |C| + 1.
+    - **Rule 2, TwoNN of the widest code: PASS on this bank.** The 16-unit codes read 6.36 (SD .32 over 3 seeds × 2
+      views), the bank's seven true factors on the same 1,000 test subjects 6.37 (stage 56's calibration row, repeated
+      exactly). Offset 7 − 6.37 = .63, so |C| reads 7.00 and the width 8; every seed alone gives 8.
+      - TwoNN rises with width and flattens from 9 units: 3.46, 4.39, 4.60, 5.48, 5.77 (8 units), 6.01, 6.07, 6.16,
+        6.36. On the sphere the same within .1 from 6 units on, so the code's length adds no dimension here.
+      - So the curves that fill units 8–16 (item 63) add no manifold dimension: they are functions of the same seven
+        factors, which is what TwoNN counts and what the loss cannot tell apart.
+    - **Rule 3, retrieval within 5% of the 4→16 range below the 16-unit top-1: PASS on the mean, not per seed.**
+      Mean top-1 among all 1,000: .169, .612, .693, .638, .771 (8), .775, .764, .783, .734 (16). The margin (.028)
+      gives 8. Per seed it gives 7, 6, 6 (two of three outside the tolerance), and an absolute margin of .05 gives 6.
+      Top-1 is not monotone (16 units below 12; 7 below 6, SD .23 at 7), so the rule rests on a noisy plateau.
+    - **What this does not settle.**
+      - One bank of three. The plan's pass needs the fixed independent bank (|C| 7) and the drawn causal bank
+        (|C| 10, target 11) too.
+      - Rule 2's offset is the bank's own, from its true latents. ADNI has none, so the offset would be borrowed. It
+        comes from the latents' distribution, not from the estimator alone: on the same subjects Gaussian noise reads
+        7.64 at 8 units and 10.05 at 10 (stage 56's calibration rows), yet the seven factors read 6.37. Whether a
+        borrowed offset holds at another |C| and SCM is untested; the drawn bank's sweep (|C| 10) is the test that
+        matters for rule 2.
+      - Both rules read the code through the gauge's stored statistics (stage 78's question). TailCode's head is
+        non-linear, so recomputing the gauge is not a per-unit rescaling and could move both.
+
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
 - **Inside the theory:** scan + residual input, separate encoders, independent jitter (a view-specific pose
@@ -2129,6 +2231,92 @@ bash out/burden_feasibility_20261102/runai_submit.sh --dry-run
     - `bash -n` passes, and `DRY=1 bash out/burden_feasibility_20261102/run_pc.sh 46` prints the arm, the view and the
       four reports.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 46` (one training arm, then the reports).
+- **Stage 79 (built 26 Nov, rules written before any of its results; the user asked for it): do E-W's width rules
+  find the drawn causal bank's width?**
+  - **Why.** Item 64: on the fixed causal bank (|C| 7) rule 2 (TwoNN + offset) gives 8 at every seed and rule 3
+    (retrieval) 8 on the mean only; rule 1 (loss elbow) fails. The plan needs three banks. The drawn bank has more
+    shared latents (seven factors and the lesion's x, y, z; |C| 10, target 11) and a different latent distribution,
+    so it also tests whether rule 2's offset, which ADNI would borrow, holds at another |C|.
+  - **Arms.** Stage 74's recipe unchanged (code batches every 500, 31 neighbours, residual, jitter 2 / 3°,
+    prediction weight 1, tails, InfoNCE, 20,000 steps) on `bank_causal_nofield`, widths 4, 6, 8, 9, 10, 11, 12, 14 and
+    16, seeds 42, 3, 4: 27 runs (`run_pc.sh 79`; Run:ai in section 3).
+  - **Reports** (`causal/stage79/`): `width_sweep.py` (`--latents 10`), `width_rules.py --latents 10 --bank`, the
+    style audit. width_sweep's own-part reference reads the seven factors only, not the lesion centre, so its k_own is
+    no reference for 11 here; read the rules against the target.
+  - **Rules** (as item 64; each passes on this bank if within one unit of 11):
+    - rule 1: the loss elbow (`width_sweep.py`, 5% of the drop);
+    - rule 2: round(TwoNN of the 16-unit codes + (10 − TwoNN of the bank's ten true latents on the same subjects)) +
+      1;
+    - rule 3: the smallest width whose mean top-1 among all 1,000 is within 5% of the 4→16 range below the 16-unit
+      code's.
+    - **Offset transfer** (what ADNI needs): rule 2 again with the fixed bank's offset (.63) in place of this bank's.
+      It transfers if that also lands within one unit of 11.
+    - A rule that passes here and in item 64 still needs the fixed independent bank before it sets ADNI's width.
+  - **Expectation, written before any result.** Rule 1 overshoots again (the curves of item 63 do not depend on the
+    bank). Rule 2 passes with this bank's offset; the offset is larger than .63, because the lesion centre is a
+    bounded, clustered variable on which TwoNN underreads, so the borrowed offset lands at 10 or below and is marginal.
+    Rule 3 is again noisy per seed. On the drawn bank the lesion's position takes about half of a narrow code (item 39),
+    so codes below 11 units should lose weak factors first and top-1 may keep rising past 11.
+- **Stage 78 (no training; rules written 26 Nov before any of its results; the user asked for it): do TailCode's
+  stored gauge statistics change any synthetic verdict?**
+  - **Why.**
+    - The gauge is TailCode's per-view BatchNorm (no learned scale or shift) between the pooled features and the head.
+      Training standardizes each batch by that batch's own statistics. Every evaluation and export reads the code in
+      eval mode, through the gauge's stored running averages (momentum .1), which the loss never uses.
+    - On ADNI the stored averages were far off (stage 73, section 10): top-1 .831 stored against .953 with the gauge
+      recomputed, on the same checkpoint.
+    - Every synthetic hold verdict, own part and ρ1 so far was read through the stored averages (`causal_bundle.py`,
+      `code_audit.load_run`, `pool_check.py export`).
+  - **Codes.** A: stage 76 part B's ten runs (`..._abl_codebatch_predict1_c8_20k_a100_sN`, seeds 6–15, labels
+    `c8_ae500_sN`). B, after A: stage 75's 45 codes (nine cells × seeds 42, 2, 3, 4, 5, its labels and verdicts).
+  - **Two exports per code,** from the same checkpoint, for the same subjects (2,000 training and 1,000 test, both
+    views):
+    - stored: as in every stage so far;
+    - recomputed: each view's gauge mean and variance recomputed over the bank's 2,000 clean training images
+      (`warm.recalibrated_pool`), the network frozen and the run's files untouched. Label-free, and no test image is
+      used.
+    - The recomputed export is a new option, off by default. With it off, the export must repeat the existing one
+      (largest difference at most 1e-4); checked on one run before anything else.
+  - **Read on both, exactly as stages 75–76:** holds by `own_directions.py`'s analysis and `holds.py`'s rule (the
+    own-parts spectrum's last value and the ventricle–burden worst direction each at least .40 in both views, test
+    subjects); ρ1 by `pool_check.py detect` (same map, CCA and settings).
+  - **Also per run and view:**
+    - how far the stored averages are from the recomputed ones, over the 448 pooled features: the mean absolute
+      offset (stored mean minus recomputed mean, in recomputed SDs) and the mean log variance ratio (log of stored over
+      recomputed variance; below 0, the stored spread is narrower), the gauge's 1e-5 added to each variance;
+    - cross-view top-1 among all 1,000 test subjects under each gauge (each view standardized over the test set,
+      cosine, both directions averaged, as `holds.py` reads it).
+  - **Rules.**
+    - **Verdicts.** A code's verdict moves if it holds under one export and not the other. Its margin is the smallest of
+      its four hold values (last value and ventricle–burden worst, T1 and FLAIR).
+      - No effect: no verdict moves and no margin moves by .05 or more. The recorded hold counts stand.
+      - Values move: no verdict moves, but some margin moves by .05 or more. The counts stand; the values are restated.
+      - Verdicts move: at least one verdict moves. Each stage's hold count is restated under the recomputed gauge,
+        with the flips each way.
+    - **ρ1.** Stages 75's and 76's detector and selection rules are re-scored with the recomputed holds and ρ1, at the
+      same thresholds:
+      - A: stands if ρ1's AUC (failures above holders) is at least .80 and the lowest ρ1 among three runs holds in at
+        least 90% of the 120 subsets that contain a holder. Fails at AUC .65 or below, or under 70%. Between:
+        unresolved. Judged only with at least two holders and two failures.
+      - B: stands if the AUC over the 45 codes is at least .80 and at least 3/4 of within-cell holder–failure pairs are
+        right. Fails at AUC .65 or below.
+      - Both: the 8-unit count of within-cell pairs right (69 of 69 stored).
+    - **Described:** ρ1 stored against recomputed (rank correlation over codes, the largest change); top-1's change;
+      the distances; and, for the mechanism, each run's stored averages against the average within-batch statistics
+      of code-neighbourhood batches (each anchor with its 31 nearest in the stored code, as these runs'
+      `--code-neighbours 31` builds them; clean training images), which is what training's batches look like.
+  - **Expectation, written before any result.**
+    - The recomputed gauge will not help here as it did on ADNI. These runs all train on code batches, and a
+      neighbourhood varies less than the population. So the stored variances should sit below the recomputed ones
+      (mean log ratio below 0), and the head was trained on features standardized within neighbourhoods.
+    - Stage 64's code audits point the same way (the mode check, 8-unit codes). Within uniform sets of 32, top-1 reads
+      .983–.991 with the stored statistics and .957–.975 with each set's own (close to the population's). Within
+      code-neighbourhood sets it is the reverse: .918–.940 against .945–.965.
+    - So: top-1 among all 1,000 the same or lower under the recomputed gauge; no verdict moves, except perhaps a code
+      whose margin is within .05 of the cut; ρ1's order nearly unchanged (rank correlation above .8), so both ρ1 rules
+      stand.
+  - **Cost:** on the PC's GPU about a minute a run for both exports (about an hour for 55), then CPU only: holds and ρ1
+    about a minute a code and export.
 - **Stage 77 (rules written 26 Nov before any of its results; the user asked for it, starting with the toy): does a
   sufficiency term make the matched-width code keep all seven own parts in one run?**
   - **Why.**
@@ -3893,8 +4081,9 @@ bash out/burden_feasibility_20261102/runai_submit.sh --dry-run
 
 ## 10. Recent stages and next steps
 
-**Built, not run (25 Nov): stage 73, why stage 68's evaluated code dipped** (built as stage 70; renumbered when
-merged with the temperature arm's stage 70). Every `--real` eval now carries the
+**Ran 25 Nov, read 26 Nov: stage 73, why stage 68's evaluated code dipped. Answer: the gauge's stored statistics.
+Recomputed on clean training images, the code matches as well as the loss's own and the dip is gone** (built as stage
+70; renumbered when merged with the temperature arm's stage 70). Every `--real` eval now carries the
 readouts of section 5, each undoing one difference between the evaluated code and the loss's. Stage 73 first reads
 them on stage 68's 20,000-step checkpoint with no training (`adni_predict1_c24_20k_at20k`; its plain row must repeat
 stage 68's last one, .831, or the checkpoint did not load as trained). Then stage 68's recipe at seed 1 (does the dip
@@ -3903,6 +4092,55 @@ every eval's checkpoint. Reading, at @32: `batch_jittered` is the loss's code an
 the gap between them is what needs explaining. `batch_clean` closing it blames the gauge's statistics,
 `running_jittered` closing it blames the clean images. If `recalibrated` closes it too (top-1 up, centred probe
 down), recomputing the gauge before export fixes the code without retraining. Run it on Run:ai (section 3).
+- **The check holds.** The 20,000-step checkpoint's plain row repeats stage 68's last row exactly (.831, @32 .951,
+  centred probe .86), so the checkpoint loaded as trained.
+- **The stored statistics are the cause; the jitter is not.** Stage 68's checkpoint, validation subjects:
+
+  | readout | top-1 among all 275 | @32 | centred probe |
+  |---|---|---|---|
+  | plain (stored statistics, clean images) | .831 | .951 | .86 |
+  | `batch_clean` | – | .984 | – |
+  | `batch_jittered` (the loss's code) | – | .983 | – |
+  | `running_jittered` | .773 | .938 | .87 |
+  | `recalibrated` | .953 | .985 | .52 |
+
+  - With batch statistics, clean or jittered images change @32 by at most .02 at any step of either batch-gauge run.
+  - Recomputing the gauge closes the whole gap to the loss's code. The views' codes can then no longer be told apart
+    (centred probe .52; chance .5).
+  - Recomputing does not lift an untrained code (step 0: .029 and .038 against plain .016 and .042).
+- **Seed 1 repeats the dip, and recomputing removes it.** Top-1 among all at steps 2,000 to 20,000:
+  - plain: .458 .269 .287 .362 .493 .480 .478 .842 .815 .896;
+  - recalibrated: .571 .738 .829 .878 .893 .913 .918 .956 .947 .949.
+  - Recalibrated @32 rises .863 → .986, within .013 of `batch_clean` at every step. Its centred probe reads .51–.56
+    from step 4,000 on; plain reads .85–.99.
+  - At 20,000: training subjects .993 (plain), effective rank 18.1 / 16.7, backbone GAP top-1 .958.
+- **The running gauge is not a fix; it is a worse recipe.** Seed 42 with `--gauge running`, where the loss sees the
+  same statistics as the test. At 20,000:
+  - top-1 .635 (recalibrated .527), @32 .894, effective rank 6.2 / 6.2 of 24;
+  - backbone GAP top-1 .222 (batch-gauge runs .935 / .958); training InfoNCE .68 (batch gauge .03–.04);
+  - it dips too: .645 at 16,000, .218 at 18,000, .635 at 20,000.
+  - On the synthetic bank it was slower with no gain. Dropped.
+- **Why the stored statistics go wrong (not tested).**
+  - They are a running average over roughly the last 10–20 training batches (BatchNorm momentum .1).
+  - The loss never uses them: in training each batch is standardized by its own statistics. So nothing in training
+    keeps them right.
+  - They are wrong for jittered images too (`running_jittered` @32 .938 against `batch_jittered` .983), so the gap is
+    not clean images against jittered ones.
+  - AdamW runs at a constant learning rate, so the late recovery is not a learning-rate decay.
+  - The test: compare stored and recomputed means and variances, feature by feature, on seed 1's kept checkpoints
+    (`model_STEP.pt`).
+- **What changes.**
+  - Stage 68's code, read with the gauge recomputed: top-1 among all .953 (seed 1 .949), @32 .985 / .986. Quote these
+    for the recipe on ADNI, not .831 / .896.
+  - Stage 68's reading of the centred probe (below: "the two views' evaluated codes pulling apart in shape") was the
+    stored statistics, not the network.
+  - The plain rows' effective rank, matching-unit r, held-out loss and modality probes all read the stored
+    statistics. None is measured on the recomputed code yet.
+  - Anchor scoring and any ADNI export should recompute the gauge first. That stays label-free: clean training images
+    only.
+  - **Synthetic banks, untested.** Every TailCode arm uses the same gauge. Bundles, holds, ρ1 and own parts are read
+    from codes gauged by the stored statistics. The frozen recipe's code batches are also rebuilt from that code
+    (`features()` in eval mode, every 500 steps), so there the stored statistics steer training as well.
 
 **Ran 24 Nov: stage 68, the recipe's first ADNI run** (the plan's step 3). `adni_bank.py` exports the
 scans (section 4), then the residuals, then stage 33's 24-unit prediction arm with `--real`, 20,000 steps, seed 42.
@@ -3920,13 +4158,15 @@ effective rank 6.7 / 6.4 → 16.3 / 15.9 of 24 units; matching-unit r .36 → .7
 so the views' codes differ by more than an offset, and training put it there: .555 untrained, .996 at 2,000 steps. It
 moves against matching: .96 / .94 / .98 in the dip, .89 and .86 as matching recovered (r −.76 with top-1 from 6,000
 steps on; the offset-sensitive probe does not track, r .22). So the dip is the two views' evaluated codes pulling apart
-in shape.
+in shape. **Corrected 26 Nov (stage 73, above): the gauge's stored statistics, not the network. With the gauge
+recomputed, the centred probe reads .52 and top-1 .953.**
 **Not stable:** from 6,000 to 16,000 steps the code's top-1 fell .489 → .278 (training subjects .595 → .362) while
 the training loss fell .175 → .053 and backbone GAP top-1 rose .775 → .900; it jumped back to .713 and .831 by 20,000.
 Not overfitting (training subjects fell as far) and not the backbone (GroupNorm, the same in training and at test).
 The loss's code and the evaluated code differ in two ways only: TailCode's BatchNorm gauge (batch statistics in
 training, running ones at test) and the jitter (evaluation images are clean). Only the 20,000-step checkpoint exists
-(`model.pt` is overwritten at each evaluation). Stage 73 (above) separates the two. Then anchor scoring, not built:
+(`model.pt` is overwritten at each evaluation). Stage 73 (above) separates the two: it was the gauge's stored
+statistics. Then anchor scoring, not built:
 FreeSurfer 7 from `data_local/freesurfer.csv` (1,543 / 1,620 subjects) and UC Davis WMH (941, almost no ADNI4), matched
 to scans through the manifest's IDs and dates.
 
@@ -4064,7 +4304,9 @@ to scans through the manifest's IDs and dates.
     scored them (log `run_pc_76b.log`).
 - **The other session (25 Nov):** it pushed `c8cfef3` (its stage 74, a content-size sweep with Run:ai submission)
   and `1bf7c96` (its stage 73, why stage 68's evaluated code dipped) on top of `d3f7d74`; the cluster checkout is at
-  `1bf7c96`, and its jobs `burden-s74-width-s3/s4/s42` show as Failed on Run:ai (not looked into here). This
+  `1bf7c96`, and its jobs `burden-s74-width-s3/s4/s42` show as Failed on Run:ai (not looked into here; later: they
+  trained all 27 runs and failed only at the causal-learn check, fixed in `21e8a25` and `482d1ce`; stage 74 is read
+  as item 63). This
   checkout's branch has `3bea16d` (not pushed) and today's uncommitted work (stages 71a, 75, 76; items 58–59), so
   the next commit needs a merge with `fork/temporal009-attention-full-width`: both sides edit `HANDOFF.md`,
   `run_pc.sh` and `warm.py`. My stages were renumbered 75 and 76 so that none collides with the other session's.

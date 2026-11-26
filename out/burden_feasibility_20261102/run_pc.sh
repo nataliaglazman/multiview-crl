@@ -385,7 +385,12 @@
 # width_sweep.py: each code's held-out InfoNCE on the test subjects and its seven own parts, the elbow of the loss over
 # width against |C| + 1 = 8 (pass: within one unit; rule in its docstring), and the width where the own parts
 # saturate; then the style audit over every width (do spare units take style, as in the numerical check?)
-# (causal/stage74/).
+# (causal/stage74/). With the defaults, width_rules.py also scores E-W's rules 2 (TwoNN + offset) and 3 (retrieval).
+# Stage 79 (opt-in) Stage 74 on the drawn-position causal bank (bank_causal_nofield; |C| 10 = seven factors and the
+# lesion centre, so the target is 11): the same recipe and seeds, WIDTH_UNITS default 4 6 8 9 10 11 12 14 16. It tests
+# whether E-W's rules land within one unit of 11, and whether rule 2's offset holds at another |C| (HANDOFF item 64).
+# Run:ai as stage 74: one job per seed (WIDTH_WAIT_BANK=1 for the second and third), then one default job to score.
+# width_sweep's own-part reference covers the seven factors only (causal/stage79/).
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
 D=out/burden_feasibility_20261102
@@ -3138,7 +3143,80 @@ if wants 74; then
             || { echo "Stage 74's width_sweep score failed, see $OUT/width_sweep$TAG.txt"; exit 1; }
     fi
     [ -z "$TAG" ] && stage_report "$OUT" style_audit "${RUNS[@]}"  # once, over every width and seed
+    if [ -z "$TAG" ]; then  # E-W rules 2 and 3 (item 64)
+        CODES=()
+        for name in "${NAMES[@]}"; do CODES+=("$D/causal/codes/$name.npz"); done
+        RULES=("$PY" "$D/width_rules.py" "$OUT/width_rules.json" "${CODES[@]}" --latents 7)
+        if [ "$DRY" = 1 ]; then echo "${RULES[*]}"
+        else "${RULES[@]}" > "$OUT/width_rules.log" 2>&1 || echo "Stage 74's width_rules failed, see $OUT/width_rules.log"; fi
+    fi
     [ "$DRY" = 0 ] && echo "Stage 74 reports in $OUT: width_sweep$TAG.txt and .png first, then style_audit.txt"
+fi
+
+if wants 79; then
+    NOFIELD=$D/bank_causal_nofield
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield
+    OUT=$D/causal/stage79
+    sfx() { [ "$1" = 42 ] && echo "" || echo "_s$1"; }  # seed 42's runs carry no suffix
+    read -r -a SEEDS <<< "${WIDTH_SEEDS:-42 3 4}"
+    read -r -a WIDTHS <<< "${WIDTH_UNITS:-4 6 8 9 10 11 12 14 16}"
+    TAG=""
+    [ "${SEEDS[*]} | ${WIDTHS[*]}" = "42 3 4 | 4 6 8 9 10 11 12 14 16" ] || TAG=_s$(IFS=-; echo "${SEEDS[*]}")_c$(IFS=-; echo "${WIDTHS[*]}")
+    ALL=() NAMES=()
+    for seed in "${SEEDS[@]}"; do
+        for units in "${WIDTHS[@]}"; do
+            ALL+=(c${units}_s$seed=${P}_abl_codebatch_predict1_c${units}_20k$(sfx "$seed"))
+        done
+    done
+    for pair in "${ALL[@]}"; do NAMES+=("${pair#*=}"); done
+    [ "$DRY" = 0 ] && { mkdir -p "$OUT" || exit 1; }
+    if [ "${WIDTH_WAIT_BANK:-0}" = 1 ] && [ "$DRY" = 0 ]; then  # a later per-seed job: another job renders the bank
+        echo "$(date +%H:%M) waiting for $NOFIELD.residual.log to say RESIDUAL DONE"
+        waited=0
+        until grep -q "RESIDUAL DONE" "$NOFIELD.residual.log" 2> /dev/null; do
+            sleep 60
+            waited=$((waited + 1))
+            [ "$waited" -ge 240 ] && { echo "Stage 79: no rendered bank after 4 hours"; exit 1; }
+        done
+    fi
+    bank "$NOFIELD" --t1-values 0.4 --causal --field off
+    residual_bank "$NOFIELD" t1_04 flair
+    PARALLEL=${WIDTH_PARALLEL:-5}
+    for pair in "${ALL[@]}"; do
+        units=${pair%%_s*}
+        units=${units#c}
+        seed=${pair%%=*}
+        seed=${seed##*_s}
+        EVERY=2000 ssl "${pair#*=}" "$NOFIELD" tail t1_04 20000 \
+            --code-batches 500 --code-neighbours 31 --residual --jitter 2 --rotate 3 --seed "$seed" \
+            --patch-weight 0 --content-units "$units" --contrastive-loss-type infonce --predict-weight 1
+    done
+    finish "${NAMES[@]}"
+    NEEDS_CAUSAL=0 needs_done 79 "${NAMES[@]}"
+    RUNS=() PAIRS=() CODES=()
+    for pair in "${ALL[@]}"; do
+        RUNS+=("$D/runs/${pair#*=}")
+        PAIRS+=("${pair%%=*}=$D/runs/${pair#*=}")
+        CODES+=("$D/causal/codes/${pair#*=}.npz")
+    done
+    MEASURE=("$PY" "$D/width_sweep.py" measure "$OUT/width_sweep$TAG.json" "$D/causal/codes" "${PAIRS[@]}")
+    SCORE=("$PY" "$D/width_sweep.py" score "$OUT/width_sweep$TAG.json" --latents 10 --figure "$OUT/width_sweep$TAG.png")
+    RULES=("$PY" "$D/width_rules.py" "$OUT/width_rules$TAG.json" "${CODES[@]}" --latents 10 --bank "$NOFIELD" --borrowed-offset 0.63)  # the fixed bank's, item 64
+    if [ "$DRY" = 1 ]; then
+        echo "${MEASURE[*]} > $OUT/width_measure$TAG.log"
+        echo "${SCORE[*]} > $OUT/width_sweep$TAG.txt"
+        echo "${RULES[*]} > $OUT/width_rules$TAG.log"
+    else
+        echo "$(date +%H:%M) width_sweep into $OUT"
+        "${MEASURE[@]}" > "$OUT/width_measure$TAG.log" 2>&1 \
+            || { echo "Stage 79's width_sweep measure failed, see $OUT/width_measure$TAG.log"; exit 1; }
+        "${SCORE[@]}" > "$OUT/width_sweep$TAG.txt" 2>&1 \
+            || { echo "Stage 79's width_sweep score failed, see $OUT/width_sweep$TAG.txt"; exit 1; }
+        "${RULES[@]}" > "$OUT/width_rules$TAG.log" 2>&1 \
+            || { echo "Stage 79's width_rules failed, see $OUT/width_rules$TAG.log"; exit 1; }
+    fi
+    [ -z "$TAG" ] && stage_report "$OUT" style_audit "${RUNS[@]}"  # once, over every width and seed
+    [ "$DRY" = 0 ] && echo "Stage 79 reports in $OUT: width_rules$TAG.txt, width_sweep$TAG.txt and .png, style_audit.txt"
 fi
 
 echo "$(date +%H:%M) all requested stages done"
