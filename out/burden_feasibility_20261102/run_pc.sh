@@ -2015,7 +2015,7 @@ needs_done() { # needs_done STAGE NAME...: stop unless every run finished
             exit 1
         fi
     done
-    if ! "$PY" -c "import causallearn" 2> /dev/null; then
+    if [ "${NEEDS_CAUSAL:-1}" = 1 ] && ! "$PY" -c "import causallearn" 2> /dev/null; then
         echo "Stage $stage needs causal-learn: $PY -m pip install causal-learn"
         exit 1
     fi
@@ -3119,7 +3119,7 @@ if wants 74; then
             --patch-weight 0 --content-units "$units" --contrastive-loss-type infonce --predict-weight 1
     done
     finish "${NAMES[@]}"
-    needs_done 74 "${NAMES[@]}"
+    NEEDS_CAUSAL=0 needs_done 74 "${NAMES[@]}"  # width_sweep and style_audit run no PC
     RUNS=() PAIRS=()
     for pair in "${ALL[@]}"; do
         RUNS+=("$D/runs/${pair#*=}")
