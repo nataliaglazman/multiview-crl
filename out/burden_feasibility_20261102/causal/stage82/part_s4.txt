@@ -1,0 +1,9 @@
+seed 4: shared k 10, chart held-out losses 0.013 0.010 0.010 0.016 0.011
+  parent fails  last +0.04/+0.07  worst +0.17/+0.19  curves [4, 4] | own brai 0.93/0.94 vent 0.51/0.44 burd 0.40/0.46 thic 0.69/0.71 temp 0.78/0.75 lr 0.67/0.70 sulc 0.64/0.67
+  linear fails  last -0.01/-0.01  worst +0.12/+0.15  curves [4, 4] | own brai 0.90/0.90 vent 0.44/0.39 burd 0.22/0.26 thic 0.51/0.57 temp 0.38/0.35 lr 0.62/0.66 sulc 0.53/0.55
+  chart  fails  last +0.07/+0.10  worst +0.19/+0.21  curves [2, 2] | own brai 0.92/0.90 vent 0.48/0.43 burd 0.40/0.46 thic 0.67/0.65 temp 0.73/0.70 lr 0.73/0.76 sulc 0.59/0.61
+seed  4: parent fails  linear fails  chart fails
+
+holding parents: 0 (rescored here: 0 hold)
+nonlinear chart holds in 0 of 0; linear chart in 0 of 0
+STAGE 82: fails (not all four holding parents run)

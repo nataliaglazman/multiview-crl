@@ -1,0 +1,24 @@
+c9e100_s42: parent ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c9_20k, shared k 9, 8-unit chart held-out losses 0.000 0.000 0.003 0.000 0.000
+  parent holds  last +0.62/+0.62  worst +0.63/+0.63  curves [2, 2]  rho1 0.31 | own brai 0.94/0.94 vent 0.80/0.78 burd 0.63/0.63 thic 0.78/0.80 temp 0.86/0.87 lr 0.84/0.87 sulc 0.73/0.77
+  linear fails  last +0.34/+0.41  worst +0.62/+0.62  curves [2, 2] | own brai 0.71/0.73 vent 0.78/0.77 burd 0.62/0.62 thic 0.78/0.80 temp 0.69/0.73 lr 0.77/0.80 sulc 0.71/0.76
+  chart  holds  last +0.62/+0.62  worst +0.64/+0.63  curves [1, 1]  rho1 0.75 | own brai 0.93/0.93 vent 0.81/0.78 burd 0.64/0.63 thic 0.75/0.77 temp 0.86/0.87 lr 0.85/0.87 sulc 0.73/0.77
+c9e100_s3: parent ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c9_20k_s3, shared k 9, 8-unit chart held-out losses 0.000 0.000 0.000 0.000 0.000
+  parent fails  last +0.16/+0.19  worst +0.30/+0.31  curves [3, 3]  rho1 0.55 | own brai 0.94/0.94 vent 0.49/0.49 burd 0.51/0.53 thic 0.74/0.74 temp 0.85/0.86 lr 0.59/0.60 sulc 0.69/0.75
+  linear fails  last +0.12/+0.16  worst +0.28/+0.31  curves [3, 2] | own brai 0.94/0.94 vent 0.49/0.48 burd 0.46/0.48 thic 0.74/0.74 temp 0.67/0.67 lr 0.58/0.59 sulc 0.63/0.67
+  chart  fails  last +0.16/+0.19  worst +0.30/+0.31  curves [2, 2]  rho1 0.69 | own brai 0.88/0.88 vent 0.50/0.49 burd 0.51/0.52 thic 0.71/0.72 temp 0.84/0.85 lr 0.58/0.60 sulc 0.68/0.74
+c9e100_s4: parent ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c9_20k_s4, shared k 9, 8-unit chart held-out losses 0.000 0.000 0.000 0.000 0.000
+  parent fails  last +0.42/+0.40  worst +0.47/+0.47  curves [3, 3]  rho1 0.20 | own brai 0.93/0.93 vent 0.74/0.66 burd 0.52/0.55 thic 0.77/0.77 temp 0.82/0.81 lr 0.90/0.91 sulc 0.62/0.69
+  linear fails  last -0.01/-0.02  worst +0.37/+0.39  curves [3, 3] | own brai 0.93/0.93 vent 0.60/0.54 burd 0.38/0.39 thic 0.77/0.76 temp 0.44/0.45 lr 0.72/0.72 sulc 0.62/0.69
+  chart  fails  last +0.41/+0.39  worst +0.46/+0.45  curves [2, 2]  rho1 0.80 | own brai 0.86/0.86 vent 0.74/0.66 burd 0.50/0.52 thic 0.75/0.75 temp 0.80/0.80 lr 0.90/0.91 sulc 0.62/0.68
+c9e100_s5: parent ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c9_20k_s5, shared k 9, 8-unit chart held-out losses 0.000 0.000 0.000 0.000 0.000
+  parent fails  last +0.17/+0.14  worst +0.58/+0.56  curves [3, 3]  rho1 0.31 | own brai 0.93/0.93 vent 0.82/0.73 burd 0.59/0.57 thic 0.55/0.56 temp 0.65/0.63 lr 0.81/0.79 sulc 0.57/0.65
+  linear fails  last -0.02/-0.02  worst +0.12/+0.12  curves [3, 3] | own brai 0.93/0.93 vent 0.82/0.72 burd 0.12/0.12 thic 0.56/0.56 temp 0.64/0.63 lr 0.80/0.77 sulc 0.43/0.49
+  chart  fails  last +0.18/+0.15  worst +0.59/+0.56  curves [2, 2]  rho1 0.62 | own brai 0.94/0.94 vent 0.81/0.71 burd 0.59/0.57 thic 0.56/0.57 temp 0.63/0.62 lr 0.80/0.77 sulc 0.56/0.64
+
+cell c9e100 (8-unit charts)
+  c9e100_s3    parent fails rho1 0.55  linear fails  chart fails rho1 0.69
+  c9e100_s4    parent fails rho1 0.20  linear fails  chart fails rho1 0.80
+  c9e100_s42   parent holds rho1 0.31  linear fails  chart holds rho1 0.75
+  c9e100_s5    parent fails rho1 0.31  linear fails  chart fails rho1 0.62
+  parents holding 1 of 4; chart holds in 1, linear chart in 0: works
+  rho1 of the charts: failing above holding in 1 of 3 pairs

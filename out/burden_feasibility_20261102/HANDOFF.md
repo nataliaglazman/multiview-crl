@@ -258,6 +258,8 @@ bash out/burden_feasibility_20261102/runai_submit.sh --dry-run
 | `spare_units.py` | no torch: where a code's whitened directions go as width grows (own parts linearly, curves of the factors by boosting, shared outside the factors, view-private), and which factors the directions past the seventh are curves of. Item 63 |
 | `width_rules.py` | no torch: E-W's rules 2 (TwoNN of the widest code plus the bank's offset from its true latents) and 3 (smallest width with top-1 among all within 5% of the range below the widest's) on a width sweep's exports, with the rules' numbers in its docstring. `--self-test`. Item 64 |
 | `head_refit.py` | stage 80: fresh heads on a frozen run's cached pooled features, the recipe's objective (control) or with `warm.Sufficiency` on frozen targets (suff), code batches from the head's own code; saves a run any report reads; `summary` reads stage 80's rules from `pool_check.py detect`'s JSON |
+| `chart_check.py` | stages 82 and 82b: a nonlinear 8- (or `--units`) unit chart of a wider code's whitened shared part, label-free, against its linear chart, scored as stage 76; `--rho` adds ρ1, `--certificate` the rebuild bound and ρ1's null, `--save` keeps the charts, `--merge` the per-cell verdicts |
+| `long_check.py` | stage 81: a pseudo-run per kept checkpoint of a continued run (`points`), and the trajectory rules on `pool_check.py detect`'s JSON (`summary`) |
 | `precision_audit.py` | the lesion-volume reading error in voxels at each stage (image filter on the residual, backbone map, GAP, pooled features, code), with the anatomy part handed to the readout; error by lesion size, error shared by the views, and the loss's reward for a sharper reading, also with lesion position and/or anatomy removed from the code. `--jitter-draws K` reads test scans moved by the run's training jitter (mean over K moves), `--split train` reads training subjects, and `precision_compare.py` puts conditions side by side. Two "weighted" price rows refit the critic to each code (one weight per unit inside the cosine; as trained, and with position and anatomy removed); rerunning the audit on a stored JSON adds them without redoing the rest |
 | `cca_readout.py` | CCA codes (top 14 or 24 canonical directions between T1 and FLAIR features, fitted on training subjects) from the pooled features and GAP, scored the same way; writes bundles |
 | `causal_bundle.py` + `causal()` | label-free (`eval.causal.latent_causal_discovery`) and decoded (`eval.protocol.compare_bundles --with-graph`) discovery against the true graph |
@@ -2132,6 +2134,68 @@ bash out/burden_feasibility_20261102/runai_submit.sh --dry-run
     - **Not run:** the other 12 backbones (4 failures, 8 holders). `causal/stage80/run_stage80.sh` runs them
       (`SEEDS`, `TRAIN_ONLY`, `TAG`). `head_refit.py` needs `warm.Sufficiency` and `run_stage80.sh` needs
       `pool_check.py`, both still uncommitted in the PC's checkout (stages 75–77).
+
+66. **Identify wide, chart narrow: a nonlinear chart brings a 9- or 10-unit code down to 8 units, or 7, without losing
+    an own part, wherever its parent holds (8 of 8; 4 of 4 at 7 units); the linear chart never does (stages 82 and
+    82b, read 26 Nov 16:40 and 18:40, `causal/stage82/`; `chart_check.py`; no training).**
+    - **Why.** At 8 units InfoNCE's entropy bends strong factors and drops a weak one (items 46, 56), and no term added
+      to it has changed that (stages 60, 70, 71, 77, 80). Wide codes hold; their spare units are curves of the seven
+      factors (item 63) and they have the factors' intrinsic dimension (item 64). A nonlinear chart can keep each
+      factor once and let its decoder rebuild the curves; on whitened targets a weak direction counts as much as a
+      strong one; and no contrastive loss competes. Every earlier compression was linear (stage 65's redundancy cut
+      and PCA, stage 75's merge).
+    - **What.** Per parent code, label-free, on training subjects (1,600 to fit, 400 held out): each view's code
+      standardized; CCA between the views; the shared directions kept (held-out agreement above .5 and a shuffled
+      null: all ten of every 10-unit code's, .87–1.00); one MLP autoencoder shared by the views (k → 128 → 128 → 8 →
+      128 → 128 → k) rebuilding each view's whitened shared variates, early stopping, the best of 5 restarts. Control:
+      the top 8 principal components of the same variates. Scored as stage 76 on the 1,000 test subjects.
+    - **Rules** (`chart_check.py`'s docstring, before any result). Stage 82: works if the 8-unit chart holds in all 4
+      holding 10-unit parents; fails at 2 or fewer. 82b (written after 82's reading, before its own results): per
+      cell, works if the chart holds in every holding parent; fails if it misses two or more.
+    - **Results** (charts that hold / parents that hold; the linear chart never holds):
+
+      | parents | parents that hold | nonlinear chart | verdict |
+      |---|---|---|---|
+      | 10 units → 8 (stage 82; rerun in 82b) | 4 of 5 | 4 of 4 | works |
+      | 10 → 7 | 4 of 5 | 4 of 4 | described |
+      | 9 units, code batches every 500 → 8 | 3 of 4 | 3 of 3 | works |
+      | 9 units, every 100 → 8 | 1 of 4 | 1 of 1 | works |
+      | 12 units → 8 (stage 74's A100 codes) | 3 of 3 | 2 of 3 | unresolved |
+      | 16 units → 8 (stage 74's) | 2 of 3 | 0 of 2 | fails |
+
+    - **Own parts** (mean of the 4 holding 10-unit parents, T1 and FLAIR), parent → 8-unit chart: brain .94 → .92,
+      ventricle .80 → .78, burden .61 → .60, thickness .76 → .73, temporal .85 → .83, left–right .85 → .80, sulcal .74
+      → .73. The linear chart drops temporal to .44 and ventricle to .56. The 10-unit parents keep 3 curve directions,
+      their 8-unit charts 1, the 7-unit charts 0–1.
+    - **Certificate** (`--certificate`, described only; on test subjects no fit saw). The chart's error rebuilding its
+      parent's shared code, as a share of its variance, the worst direction's 95% bootstrap upper bound: 8-unit charts
+      of the holding parents .0020–.0168 (mean at most .0039), 7-unit .0096–.0327. The failing parent's (seed 4) is
+      the largest at both widths, .036 and .057 (one failure). Every code's ρ1 (.28–.74) is far above its shuffled
+      null (.05–.07): no code makes the views independent.
+    - **Downstream** (10-unit parents against their 8-unit charts, T1 / FLAIR; `causal/stage82/tabular{,_rbf}.txt`,
+      `block_tabular.txt`):
+      - ATE bias with the smooth (rbf) learner: the charts match their parents (seed 42 .073 / .055 against .074 /
+        .057; the other seeds within .02). With the linear learner they are .02–.07 worse: they hold the confounding
+        content nonlinearly, as item 40's narrow codes.
+      - Discovery with all factors read out: tabular → image F1 .94–1.00 (parents .92–.96), image → tabular .83–.88
+        (.90–.93).
+      - The block as a PC node with the tabular variables (item 65's design, `block_tabular.py`): F1 .88–.94 (parents
+        .88–.96; true own parts .98).
+    - **Reading.**
+      - The chart replaces entropy with reconstruction as the guarantee that nothing is lost at the matched width. An
+        injective chart of an injective code is injective, so the chart keeps Yao's conclusion (a one-to-one,
+        content-only map of the content) at the matched width, and at 7 units, the content's own dimension, which the
+        cosine cannot reach.
+      - The chart inherits its parent and cannot add content (seed 4). Its reliability is the parent's hold rate: 10
+        units 4 of 5 here, 9 units every 500 3 of 4.
+      - Wider parents chart worse (12 units 2 of 3, 16 units 0 of 2): more curves to rebuild from 1,600 subjects, so
+        the bottleneck keeps a curve instead of a weak factor (item 27's finite-sample limit). Train slightly wide.
+      - ρ1 cannot choose among charts: on charts, failures read higher ρ1 in 3 of 3 pairs at 9 units and 2 of 2 at 12,
+        but in 0 of 4 at 10.
+      - Expectations, written before: stage 82, 2–3 of 4 (wrong: 4 of 4); 82b, works at 9 and 12 and may miss one at 16
+        (right at 9; 12 unresolved; 16 fails); 7-unit charts hold where 8-unit ones do (right).
+    - Figure: `causal/stage82/make_chart_figure.py` → `figures/fig_chart_narrow.png` and its `.csv` twin (both
+      git-ignored; the script redraws them on the PC from the stage's JSON reports). Stage 74's six 12- and 16-unit runs were copied into `causal/stage82/wide_runs/` (not `runs/`).
 
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
@@ -4134,6 +4198,28 @@ bash out/burden_feasibility_20261102/runai_submit.sh --dry-run
 
 ## 10. Recent stages and next steps
 
+**Read 26 Nov 16:40–19:30 (parallel session): stages 82 and 82b, identify wide, chart narrow (item 66).** A nonlinear
+8-unit (or 7-unit) chart of a 9- or 10-unit code holds wherever its parent holds (8 of 8), keeps its own parts within
+.05, and keeps its causal outputs with a smooth learner; linear charts never hold; wider parents chart worse. Its
+one-objective form, the chart's decoder as a wide projector, is stage 83 (running).
+
+**Running (26 Nov evening; parallel session):**
+- **Stage 83** (rules in `causal/stage83/submit_stage83.sh`, written before submission): the frozen recipe at 8 units
+  with `warm.py --projector 64 --projector-out 16` (the InfoNCE on the 16 outputs of an MLP head after the 8-unit
+  code), seeds 26–35, two A100 jobs of five (`burden-s83-wproj-a`, `-b`, submitted 18:37). Works if at least 9 of 10
+  hold with no style above .10; fails at 6 or fewer (the recipe held 5 of 10 at seeds 6–15). When all ten log DONE:
+  `FETCH=1 bash out/burden_feasibility_20261102/causal/stage83/score_stage83.sh`. `--projector-out` and its 4 tests are
+  in the PC's uncommitted `warm.py` and `tests/test_warm_projector.py`, beside stages 75–77's uncommitted work; the
+  jobs run a copy, `stage83/warm.py` on the cluster, as stage 77 did.
+- **Stage 81** (rules in `long_check.py`): stage 64's two failing 8-unit codes (seeds 42, 4) continued 40,000 steps on
+  A100s (`burden-s81-long-s42`, `-s4`), a checkpoint every 5,000. Seed 4 had finished by 18:40, seed 42 was at 48,000
+  of 60,000. When both log DONE: `FETCH=1 bash out/burden_feasibility_20261102/causal/stage81/score_stage81.sh`.
+- **Name hazard on the cluster:** its `runs/` holds stage 74's 8- and 10-unit runs at seeds 42, 3 and 4 under exactly
+  the names of this PC's stage 64–65 runs (A100 trajectories, so different codes). Never copy those into this PC's
+  `runs/`; stages 81 and 82 keep their copies under `stage81/start/` (cluster) and `causal/stage82/wide_runs/` (PC).
+- **Proposed, not adopted:** a bank whose factors have their causes in tabular data, calibrated to ADNI
+  (`SCM_PROPOSAL.md` on the PC, uncommitted).
+
 **Read 26 Nov 14:20 (parallel session): stage 80 on three failing backbones (item 65).** A fresh head on a failed
 run's frozen backbone does not repair it, with or without the sufficiency term (0 of 3); the suff heads still read ρ1
 .26–.41, inside the holders' range. Do not train on ρ1. The other 12 backbones were not run (the user stopped after
@@ -4161,7 +4247,7 @@ three).
   encoder can keep a factor once and let the decoder rebuild its curves, and a whitened weak direction counts as much
   as a strong one. Every compression so far was linear (stage 65's redundancy and PCA, stage 75's merge). First test,
   no image training: the fixed bank's five 10-unit codes against stage 65's linear compressions of the same parents.
-  Not built.
+  Built and read 26 Nov: item 66.
 
 **Recorded late (parallel session, 25–26 Nov).**
 - **Stage 55 ran on 19 Nov** (`causal/stage55/counterfactual{,_rbf}.{json,log}`; the 25 Nov status below said "built,

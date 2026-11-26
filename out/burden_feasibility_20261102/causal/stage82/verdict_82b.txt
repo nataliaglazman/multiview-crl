@@ -1,0 +1,47 @@
+
+cell c10 (8-unit charts)
+  c10_s2       parent holds rho1 0.56  linear fails  chart holds rho1 0.57
+  c10_s3       parent holds rho1 0.35  linear fails  chart holds rho1 0.55
+  c10_s4       parent fails rho1 0.46  linear fails  chart fails rho1 0.28
+  c10_s42      parent holds rho1 0.43  linear fails  chart holds rho1 0.64
+  c10_s5       parent holds rho1 0.36  linear fails  chart holds rho1 0.39
+  parents holding 4 of 5; chart holds in 4, linear chart in 0: works
+  rho1 of the charts: failing above holding in 0 of 4 pairs
+
+cell c10to7 (7-unit charts)
+  c10to7_s2    parent holds rho1 0.56  linear fails  chart holds rho1 0.72
+  c10to7_s3    parent holds rho1 0.35  linear fails  chart holds rho1 0.55
+  c10to7_s4    parent fails rho1 0.46  linear fails  chart fails rho1 0.44
+  c10to7_s42   parent holds rho1 0.43  linear fails  chart holds rho1 0.47
+  c10to7_s5    parent holds rho1 0.36  linear fails  chart holds rho1 0.74
+  parents holding 4 of 5; chart holds in 4, linear chart in 0: works
+  rho1 of the charts: failing above holding in 0 of 4 pairs
+
+cell c12 (8-unit charts)
+  c12_s3       parent holds rho1 0.25  linear fails  chart holds rho1 0.35
+  c12_s4       parent holds rho1 0.25  linear fails  chart fails rho1 0.36
+  c12_s42      parent holds rho1 0.34  linear fails  chart holds rho1 0.35
+  parents holding 3 of 3; chart holds in 2, linear chart in 0: unresolved
+  rho1 of the charts: failing above holding in 2 of 2 pairs
+
+cell c16 (8-unit charts)
+  c16_s3       parent holds rho1 0.37  linear fails  chart fails rho1 0.55
+  c16_s4       parent holds rho1 0.36  linear fails  chart fails rho1 0.44
+  c16_s42      parent fails rho1 0.56  linear fails  chart fails rho1 0.65
+  parents holding 2 of 3; chart holds in 0, linear chart in 0: fails
+
+cell c9e100 (8-unit charts)
+  c9e100_s3    parent fails rho1 0.55  linear fails  chart fails rho1 0.69
+  c9e100_s4    parent fails rho1 0.20  linear fails  chart fails rho1 0.80
+  c9e100_s42   parent holds rho1 0.31  linear fails  chart holds rho1 0.75
+  c9e100_s5    parent fails rho1 0.31  linear fails  chart fails rho1 0.62
+  parents holding 1 of 4; chart holds in 1, linear chart in 0: works
+  rho1 of the charts: failing above holding in 1 of 3 pairs
+
+cell c9e500 (8-unit charts)
+  c9e500_s3    parent holds rho1 0.52  linear fails  chart holds rho1 0.55
+  c9e500_s4    parent holds rho1 0.24  linear fails  chart holds rho1 0.55
+  c9e500_s42   parent fails rho1 0.64  linear fails  chart fails rho1 0.72
+  c9e500_s5    parent holds rho1 0.38  linear fails  chart holds rho1 0.65
+  parents holding 3 of 4; chart holds in 3, linear chart in 0: works
+  rho1 of the charts: failing above holding in 3 of 3 pairs

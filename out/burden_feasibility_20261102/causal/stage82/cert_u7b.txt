@@ -1,0 +1,16 @@
+  certificate: rebuild mean 0.0236 (<= 0.0250), worst direction 0.0517 (<= 0.0569); rho1 parent 0.46, chart 0.44 (null95 0.06)
+cert7_s4: parent ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s4, shared k 10, 7-unit chart held-out losses 0.028 0.029 0.042 0.026 0.027
+  parent fails  last +0.04/+0.07  worst +0.17/+0.19  curves [4, 4]  rho1 0.46 | own brai 0.93/0.94 vent 0.51/0.44 burd 0.40/0.46 thic 0.69/0.71 temp 0.78/0.75 lr 0.67/0.70 sulc 0.64/0.67
+  linear fails  last -0.01/-0.02  worst +0.10/+0.12  curves [3, 3] | own brai 0.86/0.86 vent 0.43/0.38 burd 0.20/0.24 thic 0.26/0.28 temp 0.36/0.35 lr 0.60/0.65 sulc 0.53/0.55
+  chart  fails  last -0.00/-0.00  worst +0.12/+0.15  curves [1, 1]  rho1 0.44 | own brai 0.92/0.91 vent 0.39/0.38 burd 0.33/0.39 thic 0.67/0.67 temp 0.78/0.80 lr 0.55/0.56 sulc 0.60/0.62
+  certificate: rebuild mean 0.0109 (<= 0.0126), worst direction 0.0227 (<= 0.0283); rho1 parent 0.36, chart 0.74 (null95 0.06)
+cert7_s5: parent ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s5, shared k 10, 7-unit chart held-out losses 0.022 0.017 0.017 0.015 0.015
+  parent holds  last +0.63/+0.62  worst +0.64/+0.63  curves [3, 3]  rho1 0.36 | own brai 0.94/0.93 vent 0.82/0.75 burd 0.65/0.63 thic 0.75/0.76 temp 0.84/0.84 lr 0.88/0.88 sulc 0.75/0.77
+  linear fails  last -0.02/-0.02  worst +0.32/+0.29  curves [3, 2] | own brai 0.55/0.57 vent 0.34/0.31 burd 0.54/0.51 thic 0.71/0.72 temp 0.19/0.18 lr 0.78/0.81 sulc 0.67/0.70
+  chart  holds  last +0.42/+0.42  worst +0.54/+0.51  curves [1, 1]  rho1 0.74 | own brai 0.91/0.91 vent 0.77/0.70 burd 0.54/0.51 thic 0.60/0.60 temp 0.71/0.74 lr 0.85/0.86 sulc 0.68/0.68
+
+cell cert7 (7-unit charts)
+  cert7_s4     parent fails rho1 0.46  linear fails  chart fails rho1 0.44
+  cert7_s5     parent holds rho1 0.36  linear fails  chart holds rho1 0.74
+  parents holding 1 of 2; chart holds in 1, linear chart in 0: works
+  rho1 of the charts: failing above holding in 0 of 1 pairs

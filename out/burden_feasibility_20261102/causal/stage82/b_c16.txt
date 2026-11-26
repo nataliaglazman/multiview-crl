@@ -1,0 +1,21 @@
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c16_20k.npz {'code_train': (2, 2000, 16), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 16), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+c16_s42: parent ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c16_20k, shared k 16, 8-unit chart held-out losses 0.027 0.018 0.015 0.023 0.013
+  parent fails  last +0.26/+0.28  worst +0.50/+0.54  curves [10, 10]  rho1 0.56 | own brai 0.93/0.94 vent 0.81/0.78 burd 0.52/0.57 thic 0.68/0.66 temp 0.71/0.71 lr 0.68/0.71 sulc 0.60/0.66
+  linear fails  last -0.01/-0.01  worst +0.42/+0.44  curves [6, 6] | own brai 0.05/0.05 vent 0.48/0.48 burd 0.42/0.46 thic 0.25/0.23 temp 0.10/0.09 lr 0.22/0.24 sulc 0.05/0.05
+  chart  fails  last +0.03/+0.04  worst +0.40/+0.46  curves [3, 3]  rho1 0.65 | own brai 0.86/0.87 vent 0.70/0.66 burd 0.44/0.50 thic 0.48/0.49 temp 0.53/0.54 lr 0.55/0.55 sulc 0.48/0.50
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c16_20k_s3.npz {'code_train': (2, 2000, 16), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 16), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+c16_s3: parent ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c16_20k_s3, shared k 16, 8-unit chart held-out losses 0.045 0.043 0.040 0.028 0.035
+  parent holds  last +0.60/+0.60  worst +0.61/+0.62  curves [9, 9]  rho1 0.37 | own brai 0.93/0.94 vent 0.79/0.76 burd 0.63/0.66 thic 0.76/0.76 temp 0.86/0.85 lr 0.79/0.79 sulc 0.71/0.74
+  linear fails  last -0.02/-0.02  worst +0.28/+0.32  curves [5, 5] | own brai 0.05/0.07 vent 0.52/0.49 burd 0.32/0.38 thic 0.38/0.41 temp 0.24/0.22 lr 0.50/0.53 sulc 0.39/0.40
+  chart  fails  last +0.16/+0.17  worst +0.24/+0.24  curves [3, 3]  rho1 0.55 | own brai 0.87/0.87 vent 0.50/0.49 burd 0.32/0.32 thic 0.61/0.61 temp 0.81/0.80 lr 0.76/0.76 sulc 0.47/0.49
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c16_20k_s4.npz {'code_train': (2, 2000, 16), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 16), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+c16_s4: parent ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c16_20k_s4, shared k 16, 8-unit chart held-out losses 0.032 0.030 0.030 0.023 0.030
+  parent holds  last +0.50/+0.59  worst +0.62/+0.61  curves [9, 9]  rho1 0.36 | own brai 0.95/0.94 vent 0.79/0.73 burd 0.64/0.64 thic 0.70/0.72 temp 0.62/0.66 lr 0.83/0.83 sulc 0.63/0.72
+  linear fails  last -0.01/-0.02  worst +0.23/+0.22  curves [7, 7] | own brai 0.04/0.04 vent 0.32/0.30 burd 0.23/0.22 thic 0.16/0.15 temp 0.48/0.48 lr 0.10/0.13 sulc 0.34/0.39
+  chart  fails  last +0.12/+0.15  worst +0.52/+0.49  curves [4, 4]  rho1 0.44 | own brai 0.90/0.90 vent 0.62/0.59 burd 0.57/0.56 thic 0.64/0.64 temp 0.25/0.25 lr 0.78/0.77 sulc 0.40/0.44
+
+cell c16 (8-unit charts)
+  c16_s3       parent holds rho1 0.37  linear fails  chart fails rho1 0.55
+  c16_s4       parent holds rho1 0.36  linear fails  chart fails rho1 0.44
+  c16_s42      parent fails rho1 0.56  linear fails  chart fails rho1 0.65
+  parents holding 2 of 3; chart holds in 0, linear chart in 0: fails

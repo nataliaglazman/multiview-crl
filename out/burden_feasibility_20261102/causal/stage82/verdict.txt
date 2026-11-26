@@ -1,0 +1,9 @@
+seed  2: parent holds  linear fails  chart holds
+seed  3: parent holds  linear fails  chart holds
+seed  4: parent fails  linear fails  chart fails
+seed  5: parent holds  linear fails  chart holds
+seed 42: parent holds  linear fails  chart holds
+
+holding parents: 4 (rescored here: 4 hold)
+nonlinear chart holds in 4 of 4; linear chart in 0 of 4
+STAGE 82: works

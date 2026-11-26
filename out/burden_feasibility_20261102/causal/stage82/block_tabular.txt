@@ -1,0 +1,43 @@
+seed 0: block-tab truth ['tabular_cause_1', 'tabular_cause_2', 'treatment']
+seed 1: block-tab truth ['tabular_cause_1', 'tabular_cause_2', 'treatment']
+seed 2: block-tab truth ['tabular_cause_1', 'tabular_cause_2', 'treatment', 'outcome']
+seed 3: block-tab truth ['outcome']
+seed 4: block-tab truth ['tabular_cause_1', 'tabular_cause_2', 'treatment', 'outcome']
+seed 5: block-tab truth ['tabular_cause_1', 'tabular_cause_2', 'outcome']
+seed 6: block-tab truth ['tabular_cause_1']
+seed 7: block-tab truth ['tabular_cause_2', 'treatment']
+seed 8: block-tab truth ['tabular_cause_1']
+seed 9: block-tab truth ['tabular_cause_1', 'outcome']
+arm                                           comps  block-tab P/R/F1      anchor-tab P/R/F1     tab-tab F1
+oracle block                                    3.0  0.96 1.00 0.98      0.89 0.77 0.83      0.98
+anchors only                                    0.0  nan 0.00 0.00      0.89 0.77 0.83      0.92
+parent10_s42 / T1                               5.0  0.88 0.92 0.90      0.89 0.77 0.83      0.93
+parent10_s42 / FLAIR                            5.0  0.88 0.88 0.88      0.89 0.77 0.83      0.94
+parent10_s42 / T1 (untrained)                   0.0  nan 0.00 0.00      0.89 0.77 0.83      0.92
+parent10_s42 / FLAIR (untrained)                0.0  nan 0.00 0.00      0.89 0.77 0.83      0.92
+chart8_s42 / T1                                 5.0  0.82 0.96 0.88      0.89 0.77 0.83      0.94
+chart8_s42 / FLAIR                              5.0  0.91 0.88 0.89      0.89 0.77 0.83      0.94
+parent10_s2 / T1                                6.0  0.85 0.92 0.88      0.92 0.77 0.84      0.95
+parent10_s2 / FLAIR                             6.0  0.88 0.92 0.90      0.89 0.77 0.83      0.94
+parent10_s2 / T1 (untrained)                    0.0  nan 0.00 0.00      0.89 0.77 0.83      0.92
+parent10_s2 / FLAIR (untrained)                 0.0  nan 0.00 0.00      0.89 0.77 0.83      0.92
+chart8_s2 / T1                                  5.0  0.88 0.88 0.88      0.89 0.77 0.83      0.94
+chart8_s2 / FLAIR                               5.0  0.95 0.88 0.91      0.89 0.77 0.83      0.94
+parent10_s3 / T1                                7.0  0.88 0.88 0.88      0.89 0.77 0.83      0.93
+parent10_s3 / FLAIR                             7.0  0.95 0.88 0.91      0.89 0.77 0.83      0.94
+parent10_s3 / T1 (untrained)                    0.0  nan 0.00 0.00      0.89 0.77 0.83      0.92
+parent10_s3 / FLAIR (untrained)                 0.0  nan 0.00 0.00      0.89 0.77 0.83      0.92
+chart8_s3 / T1                                  7.0  0.91 0.88 0.89      0.89 0.77 0.83      0.94
+chart8_s3 / FLAIR                               7.0  0.96 0.92 0.94      0.89 0.77 0.83      0.94
+parent10_s4 / T1                                5.0  0.90 0.79 0.84      0.89 0.77 0.83      0.93
+parent10_s4 / FLAIR                             5.0  0.86 0.79 0.83      0.89 0.77 0.83      0.93
+parent10_s4 / T1 (untrained)                    0.0  nan 0.00 0.00      0.89 0.77 0.83      0.92
+parent10_s4 / FLAIR (untrained)                 0.0  nan 0.00 0.00      0.89 0.77 0.83      0.92
+chart8_s4 / T1                                  6.0  0.95 0.88 0.91      0.89 0.77 0.83      0.94
+chart8_s4 / FLAIR                               6.0  0.83 0.83 0.83      0.89 0.77 0.83      0.95
+parent10_s5 / T1                                5.0  0.96 0.92 0.94      0.89 0.77 0.83      0.94
+parent10_s5 / FLAIR                             5.0  1.00 0.92 0.96      0.89 0.77 0.83      0.95
+parent10_s5 / T1 (untrained)                    0.0  nan 0.00 0.00      0.89 0.77 0.83      0.92
+parent10_s5 / FLAIR (untrained)                 0.0  nan 0.00 0.00      0.89 0.77 0.83      0.92
+chart8_s5 / T1                                  4.0  0.95 0.88 0.91      0.89 0.77 0.83      0.95
+chart8_s5 / FLAIR                               4.0  0.95 0.88 0.91      0.89 0.77 0.83      0.95
