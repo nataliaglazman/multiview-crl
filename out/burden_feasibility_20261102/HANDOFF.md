@@ -1844,6 +1844,141 @@ bash out/burden_feasibility_20261102/runai_submit.sh --dry-run
       adds little more, and a shared artifact adds more. Rewarding the seventh local direction would therefore not
       pick out the missing factor. Not a training target in this form.
 
+58. **A projector head does not make 8 units reliable: it never bends, the curves stay, and holds fall to 2/5
+    (stage 71, read 25 Nov, `causal/stage71/holds.txt`, `own_directions.txt`).** The PC's five, paired by seed with
+    the from-scratch 8-unit codes; the A100 replicate is read separately (stage 71a).
+    - **Against the rules fixed before the results: no better.** Holds 2/5 (seeds 3, 5) against 3/5, and matches 1/5
+      (seed 3) against 2/5: within 1 both times, so "no better", not "worse" (that needs 1/5 or none). Paired by seed
+      it rescues neither failure (42, 4) and loses seed 2 (last value .32 / .29, ventricle–burden worst .43 / .40).
+    - **Mechanism: fails.** Holders spend one direction on curves and failures two, exactly as from scratch: 2 of 5
+      codes have at most one curve per view (from scratch 3 of 5), and 3 codes (42, 2, 4) still spend two. Every code's
+      eighth direction is a curve of brain size (boosted .96–.99 from the seven factors, brain alone .77–.86). The
+      second curve in the failures reads .72–.79 by boosting.
+    - **The head stayed linear:** linearity .979–.994 at step 20,000. The arm tested a learned linear reweighting of
+      the units, not bending after the code.
+    - **Which direction goes still moves with the seed.** Seed 4 now holds the ventricle–burden plane (worst .52 /
+      .50, from scratch .22 / .19) but loses a mix of sulcal, lr, thickness and temporal (last value .00). Seed 42 still
+      loses ventricle–burden (worst .18 / .19). Seed 2 loses part of ventricle, burden and sulcal.
+    - **Costs: none by the rules.** Cross-view top-1 changes by −.01 on average (paired: +.02, −.05, .00, −.03,
+      +.01). Style at most .02 in any code and view.
+    - **Described:** ATE bias is higher in the holders (.09–.11 against .07–.08 from scratch); decoded graph within
+      .01 of from scratch except seed 4 (.73 / .71 against .78) and seed 42 (.81 against .76–.77).
+    - **Expectation, written before:** curves leave, the head bends, holds rise to about 4/5. All three wrong. The
+      named failure ("without helping": holds near 3/5 with fewer curves) did not happen either: the curves did not
+      fall. The head left the tie between a curve and the weakest own direction where it was.
+    - **Reading.** Seventh training change at 8 units without effect on the hold rate (rebuild interval, prediction
+      weight, compressed start, longer training, harmonic penalty, temperature, projector head). Not a lever.
+    - **A100 replicate** (stage 71a, `causal/stage71a/holds.txt`, read 25 Nov 18:05; described only, as fixed
+      before): holds 1/5 (seed 2) and matches 1/5 (seed 2). The ten projector codes pooled: holds 3/10, matches
+      2/10, against 3/5 and 2/5 from scratch. The holder spends one direction on curves and the four failures two
+      (their seventh direction .00–.26). Linearity .977–.994, top-1 −.01 on average, style at most .03.
+      - **No seed held on both GPUs.** The PC held at seeds 3 and 5, the A100 at seed 2. The same seed and flags on
+        another GPU flipped the outcome at three of five seeds (2, 3, 5). Whether a run holds is settled along the
+        trajectory, not fixed by the seed, so it behaves like a coin flip per run: a reason to pool or choose among
+        runs (the cross-seed check, the merge) rather than to look for good seeds.
+
+59. **The backbone's shared leftover past the code tells failing codes from holders without labels (AUC .97, every
+    within-cell pair right); merging runs and repairing a code by the leftover both fail (stage 75, read 25 Nov,
+    `causal/stage75/pool_check.txt`).** 45 fixed-bank 8-unit codes in nine cells, no training.
+    - **Against the rules fixed before the results:**
+      - **Merge: fails.** The merged code holds in 4 of the 8 cells with a holder (e500 narrowly at .42 / .44, red,
+        pca, proj64), against the rule's 7; 4 or fewer is "fails".
+      - **Detector: works.** ρ1, the held-out correlation of the top direction the two views' leftovers share, is
+        higher in every failing code than in every holder of its cell (44 of 44 pairs), AUC .97 over all 45 codes.
+        Holders read .19–.56 (median .41), failures .45–.86 (median .61), tau1's .75–.87.
+      - **Repair: fails.** 4 of 23 failing codes hold after the swap (e100_s42, harm_s5, proj64_s2, aproj64_s42);
+        no holder stops holding (0 of 17).
+    - **So the lowest ρ1 in each cell is a holder, in all 8 cells with one** (a consequence of the 44 pairs, not a
+      separate test). Top-1 put 7–9 codes on the wrong side on the same codes (items 51, 58).
+    - **Why the detector works, in the theory's terms.** The views are independent given the content, because
+      style is drawn per view. A code that holds all the content therefore leaves nothing the views share once each
+      view's backbone features are regressed on it. A code that lost a direction leaves that direction shared. ρ1 is
+      a test of the views' conditional independence given the code: it checks the "all" half of block
+      identifiability directly. Holders' floor (.2–.5) is the finite-sample map plus the weak parts they hold only
+      partly.
+    - **Why the repair fails.** The top shared leftover direction is not the lost own part. In failing codes it reads
+      the best single own part at r² .02–.24 only; the lost direction shares it with other content the code does not
+      hold. The swap raised the ventricle–burden worst direction in some codes (e500_s42 .05 → .32, e500_s4 .22 →
+      .44) but rarely to a hold. The removed direction was a curve every time (boosted from the factors .89–.99).
+    - **Why the merge fails.** As the expectation's named miss: the merged code spends two directions on curves in
+      the failing cells (e500, cont, harm, aproj64), so the bottleneck meets the same tie. Its restarts disagree
+      (2–5 of 5 hold per cell), so merging has a lottery of its own.
+    - **Described:**
+      - Failing runs merged alone hold in 2 of 9 cells (pca, proj64): sometimes the failures' union is enough.
+      - Random subsets: 2 runs hold in 5 of 27 merges, 3 runs in 14 of 27. All ten projector runs merged hold
+        (.61 / .59). Same-seed PC and A100 pairs hold at seeds 2 and 5, not at 3, 4, 42.
+      - Against `c10_e500_s42`, holding merges still miss sulcal (pca, proj64) or ventricle (e500).
+    - **Expectation, written before:** merge 7–8 of 8 (wrong: 4); detector AUC .75–.85 (wrong, better: .97, 44 of
+      44); repair about half of failures (wrong: 4 of 23).
+    - **Reading.** A label-free way to tell which runs hold now exists, and it follows from the theory's own
+      assumption (views independent given the content). With it, the frozen recipe plus several runs and the
+      lowest ρ1 gives a holding code in every cell here. Not yet shown on runs the rule never saw: new seeds, other
+      banks and widths, and ADNI, where every code will leave some shared content and only the ranking within a
+      recipe can be read.
+
+60. **At 9 and 10 units the leftover detector does not separate holders from failures (stage 76 part A, read 25 Nov
+    23:40, `causal/stage76/existing.txt`).** The fixed bank's 13 codes with verdicts, no training.
+    - **Against the rule fixed before the results: fails.** AUC .55 (failures above holders; the rule fails it at .65
+      or below) and 7 of 10 within-cell pairs right (it needed 8). Holds recomputed from the bundles match the stages'
+      verdicts for all 13.
+    - **Per cell** (ρ1 by rank, h holds, f fails):
+      - 10 units every 500: .35h .36h .43h .46f .56h, 3 of 4 pairs. The failure is seed 4, which fails at every
+        width; it sits between the holders.
+      - 9 units every 500: .24h .38h .52h .64f, 3 of 3.
+      - 9 units every 100: .20f .31f .31h .55f, 1 of 3. The lowest is seed 4, a near-holder (FLAIR's last value
+        .399 against the .40 cut). Seed 5 (.31) lost a thickness–temporal–sulcal mix, not the ventricle–burden
+        plane, and leaves little shared leftover for it.
+    - The lowest ρ1 per cell holds in 2 of 3 cells (both every-500 cells).
+    - **Described, other banks and recipes** (single seeds, all failing by the hold rule): ρ1 .47–.77, all within
+      stage 75's failure range (.45 and up); no holder to compare.
+    - **Expectation, written before:** holds up, AUC about .9. Wrong.
+    - **Reading.** The clean split at 8 units (item 59) does not carry to 9 and 10 units in this form. Pooled across
+      cells, ρ1's level differs with width and recipe, and within cells three of the ten pairs are wrong: a
+      near-holder, a code that lost a cortical mix the leftover barely shows, and seed 4 at 10 units. Whether the rule
+      works at 8 units on runs it never saw is part B's question (item 61).
+
+61. **On ten new 8-unit runs, the lowest ρ1 always picks a holder (stage 76 part B, read 26 Nov 03:45,
+    `causal/stage76/new_seeds.txt`).** The frozen recipe at seeds 6–15, each trained as its own Run:ai job on one A100
+    (25 Nov 23:00 to 26 Nov 03:35; flags identical to the original from-scratch runs, apart from options added since,
+    all at their off defaults), copied back, bundled and scored.
+    - **Hold rate 5 of 10** (seeds 6, 10, 11, 12, 13 hold; 7, 8, 9, 14, 15 fail), against 3 of 5 from scratch on the
+      PC.
+    - **Against the rules fixed before the results: both work.**
+      - Detector: AUC 1.00, 25 of 25 holder–failure pairs right. Holders read .32–.44, failures .46–.68.
+      - Selection: in all 110 of the 120 subsets of three runs that contain a holder, the lowest ρ1 holds (100%; a
+        random pick 55%).
+    - **Described:** K = 2, 4 and 5 also pick a holder in every subset that has one (35 of 35, 205 of 205, 251 of
+      251). Stage 75's ranges as a fixed cut: every holder at or under .56 and every failure at or over .45, but a
+      cut at .50 misclassifies seed 15 (a failure at .46). The thinnest margin is .02: holder seed 12 at .44 against
+      failure seed 15 at .46, whose ventricle–burden worst direction reads .39 / .33.
+    - **Expectation, written before:** 4–6 of 10 hold (right, 5); AUC about .9 (better, 1.00); the pick holds in
+      about 95% of subsets with a holder (better, 100%).
+    - **Reading.**
+      - At the matched width the rule now holds on 69 of 69 within-cell pairs: 44 in stage 75, 25 here on runs it
+        never saw. At 9 and 10 units it does not (item 60). The paper's subject is the matched width.
+      - So "train several runs of the frozen recipe and keep the one with the lowest ρ1" gives a holding 8-unit code
+        whenever any run holds, with no labels: at a 50% hold rate, 3 runs suffice 7 times in 8 and 5 runs 31 in 32.
+      - Read ρ1 as a ranking among runs of one recipe, not as a fixed cut: its level moves with recipe and width.
+      - Its justification is the theory's own assumption: the two views are independent given the content, so a
+        complete code leaves nothing shared in the backbone (item 59).
+
+62. **The new toy does not reproduce the width-dependent failure, so it cannot test the sufficiency term (stage 77
+    step 1, calibration read 26 Nov 10:21, `causal/stage77/calibration.txt`).** Baseline only (InfoNCE plus linear
+    prediction), 9 settings × 2 widths × 5 seeds.
+    - **Against the rule: no setting meets all three conditions; step 1 stops.**
+      - At parent share .5 and view noise .3 the backbone holds the faint own part (.68) and both widths hold: 12
+        units 5 of 5 (burden own .62), 8 units 5 of 5 (.56). No narrow-width failure.
+      - Every harder setting fails at both widths (12 units hold 0 of 5). The faint own part's availability in the
+        backbone falls to .50 and below, so the failures are of seeing, not of the narrow code's competition.
+      - The width gap exists but sits below the hold line: at share .7 and noise .3, 12 units read burden's own part
+        .34 and 8 units .19 (availability .50); at share .5 and noise .6, .26 against .04 (availability .42).
+    - **Why the toy differs from the bank.** On the bank the backbone reads burden's own part at .58–.60 while
+      failing 8-unit codes read .30, and 10 units hold in 4 of 5. The toy has no code batches, which item 41 found
+      make matched width hold, and its MLP backbone sees the faint part less well than the bank's convolutional one
+      at the same difficulty. A finer grid between the two regimes (share .5–.7, noise .3–.6) might find a setting
+      that meets the rule; that would be a new calibration, recorded before any sufficiency run.
+    - **No sufficiency run was made**, so nothing here argues for or against the term.
+
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
 - **Inside the theory:** scan + residual input, separate encoders, independent jitter (a view-specific pose
@@ -1994,6 +2129,226 @@ bash out/burden_feasibility_20261102/runai_submit.sh --dry-run
     - `bash -n` passes, and `DRY=1 bash out/burden_feasibility_20261102/run_pc.sh 46` prints the arm, the view and the
       four reports.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 46` (one training arm, then the reports).
+- **Stage 77 (rules written 26 Nov before any of its results; the user asked for it, starting with the toy): does a
+  sufficiency term make the matched-width code keep all seven own parts in one run?**
+  - **Why.**
+    - Items 59–61: ρ1, the canonical correlation the two views' features still share once a flexible map from the
+      code has explained what it can, tells holders from failures at 8 units in 69 of 69 within-cell pairs. Picking
+      the lowest ρ1 among several runs works but needs the several runs.
+    - Train on the quantity instead. Code batches (negatives alike in the current code, so the loss pays only for
+      what the code lacks) and the cross-view prediction term (whitened before the code's part is removed, so a weak
+      direction is diluted, and with a linear map that pays for curves) both approximate it. A term computed after
+      the code's part is removed does not dilute the weak direction, and curves earn nothing from it.
+    - In the theory's terms: alignment makes the code computable from either view alone (a Gács–Körner common
+      part: "only"); sufficiency makes the views independent given it (a Wyner common variable: "all"). Together at
+      matched width they ask for exactly block identifiability.
+  - **The term.** Targets are each view's whitened momentum-teacher features (as the prediction term's). A small MLP
+    per view (the explainer) predicts its own view's targets from that view's code, trained by squared error with the
+    code detached, so the explainer cannot pay the code for style. The residuals (targets minus the explainer's
+    output, the explainer's weights frozen for this part) are whitened by running statistics, and the loss is the
+    sum of squared cross-view correlations between the two views' whitened residuals (the squared canonical
+    correlations). Its gradient reaches the encoder only through the code.
+  - **Step 1, the toy** (`sufficiency_toy.py`, no images, CPU). The toy the paper plan cites for E5a
+    (`training/prediction_identifiability_numerical.py`) is not on this machine or in git, so a new one is built for
+    this question.
+    - Model: seven shared latents; six strong and independent; the seventh (faint) gets a parent share and its own
+      part. Each view sees the latents through its own fixed non-linear map, with three style latents of its own,
+      noise, and its own noise on the faint latent. 2,000 training and 1,000 test subjects. Per view an MLP encoder
+      (a 64-wide hidden layer as the backbone, then an 8-unit code). Scored by ridge R² of each own part from each
+      view's code on test subjects; a code holds if every own part reads at least .40 in both views.
+    - Baseline, the recipe's objective in small: InfoNCE (cosine on per-unit batch-standardized codes, τ .1, batch
+      32, negatives from the batch) plus linear cross-view prediction (weight 1) of the other view's whitened teacher
+      features.
+    - **Calibration, on the baseline alone, before any sufficiency run:** the faint latent's parent share and view
+      noise are chosen from a small grid on seeds 0–4 so that (a) the teacher features hold the faint own part
+      (ridge R² at least .5), (b) a 12-unit baseline code holds it (at least .40 in both views) in at least 4 of 5
+      seeds, and (c) the 8-unit baseline loses it in at least 3 of 5. If no setting in the grid meets all three, the
+      toy is uninformative and step 1 stops there.
+    - The grid: parent share .5, .7, .85 crossed with view noise .3, .6, 1.0 on the faint latent. Of the settings
+      that meet (a)–(c), the one where the 8-unit baseline fails most often is used; ties go to the parent share
+      nearest the bank's .7 (ventricle explains about 70% of burden), then to the lower noise. Availability (a) is
+      read from the 8-unit baseline's trained backbone, averaged over views and seeds.
+    - Arms at seeds 0–9 in the chosen setting: the baseline; the baseline plus sufficiency (weight 1); and lean,
+      InfoNCE plus sufficiency without the prediction term.
+    - **Rule:** sufficiency passes the toy if baseline plus sufficiency holds in at least 8 of 10 seeds and in at
+      least 3 more than the baseline. It fails if it holds in at most 1 more than the baseline. Between: unresolved.
+      A cost if the strong own parts fall more than .05 below the baseline on average.
+    - **Described:** the lean arm; ρ1 at the end of training in each arm; seeds 5–9 alone (never used to calibrate).
+    - **Built 26 Nov:** `sufficiency_toy.py` (`calibrate`, then `arms --share S --noise N`; outputs in
+      `causal/stage77/`). Self-test: on fixed codes with fitted explainers, the term's running squared canonical
+      correlation reads .87 when the code lacks a part both views' targets share and .002 when it holds it. A run of
+      8,000 steps and its scoring take about 35 s on one CPU thread.
+    - **Calibration read 26 Nov 10:21 (item 62): no setting meets (a)–(c), so the toy is uninformative and step 1
+      stops, as the rule says.** No sufficiency run was made.
+  - **Step 2, built 26 Nov (the user chose to go straight to it and agreed to the Run:ai jobs once the tests pass):**
+    - `warm.py --sufficiency-weight W [--sufficiency-hidden H]` (classes `RunningMoments`, `Sufficiency`). The local
+      `warm.py` is now the other session's (`1bf7c96`) plus this option, so the later merge is trivial and the cluster's
+      other modules match. Off by default; with it off every code path and random draw is as before.
+    - The term as built: on the contrastive batch, with the prediction term's whitened teacher GAP as targets (the
+      teacher is built even without `--predict-weight`). Explainers 8 → 128 → 128 → 64 per view, trained in the main
+      optimizer by squared error with the code detached. Residuals (explainers frozen) are whitened by running moments
+      that start at mean 0 and covariance I, then each channel is standardized over the batch inside the graph. The
+      running cross-view matrix starts at zero, and the term is sum(running × batch matrix).
+    - Two faults found by smoke runs and fixed before any result. First, moments seeded from the first batch (32
+      subjects, 64 channels) were rank-deficient, and the running values reached 240. Second, without the per-batch
+      standardization the term is linear in an unnormalized matrix, which the encoder could drive down without bound
+      by inflating residuals faster than the running whitening follows; the values grew to 41 by step 300.
+    - With both fixes the values stay bounded but are not exact canonical correlations early on: the top value reads
+      4.5–4.6 at steps 200–400 and 1.2 by step 600, while the lagging whitening leaves channels correlated within a
+      view. The fixed point (zero) means the views' residuals are uncorrelated.
+    - Tests, `tests/test_warm_sufficiency.py`, 6: options refused with a message and nothing written; the term reads a
+      shared part the code lacks (> .6) and not one it holds (< .15); a curve does not stand in for the missing part;
+      gradients reach the code from the term and the explainers only from their fit; values stay at or under 1 when
+      the first batches are rank-deficient; the moments whiten. The other warm suites pass (39), and so do the other
+      session's 7 readout tests run against this `warm.py`.
+    - Smoke, 600 steps of the recipe plus sufficiency on the fixed bank: InfoNCE and prediction track the recipe
+      step for step (11.33 against 11.44 at step 100, 7.50 against 7.12 at 500); about 15% slower. The lean arm runs;
+      `code_audit.load_run` loads both checkpoints (the term is saved under its own key).
+  - **Step 3, the runs** (rules above; seeds 16–25, none used on this bank; one A100 job each, `runai_warm.sh` with
+    `WARM=stage77/warm.py`: this `warm.py` copied into an untracked `stage77/` folder on the cluster, so the other
+    session's checkout and its tracked `warm.py` are left alone):
+    - (a) `..._abl_codebatch_predict1_suff1_c8_20k_a100_sN`, labels `c8_asuff_sN`: the frozen recipe's flags plus
+      `--sufficiency-weight 1`.
+    - (b) `..._uni_suff1_c8_20k_a100_sN`, labels `c8_alean_sN`: `--pool tail --t1key t1_04 --uniform --residual
+      --jitter 2 --rotate 3 --patch-weight 0 --content-units 8 --contrastive-loss-type infonce
+      --sufficiency-weight 1`, 20,000 steps, evals every 2,000.
+    - Scored as stage 76 part B (`run_pc.sh 77b`: bundles, `pool_check.py detect` for holds and ρ1), plus
+      `style_audit.py` on both arms for rule (b)'s style bound.
+    - **Submitted 26 Nov 10:49** as `burden-s77-suff-sN` and `burden-s77-lean-sN`. The first pods crashed at start:
+      `warm.py` reads `reference/flags.txt` beside itself, which `stage77/` lacked. A symlink `stage77/reference ->
+      ../reference` (10:51) fixed it, and Run:ai restarted the crashed pods on their own (each workload allows several
+      attempts; a restart rewrites its log). No training step ran before the fix.
+  - **Steps 2 and 3, only if the toy passes and the user agrees to the Run:ai jobs:**
+    - `warm.py --sufficiency-weight W` with unit tests: a complete synthetic code scores about 0 and an incomplete
+      one high; curves do not lower the score; no gradient reaches the explainer's weights from the term, nor the
+      code from the explainer's own fit.
+    - Ten new seeds of each of two arms on Run:ai, scored like stage 76 part B:
+      - (a) the frozen recipe plus sufficiency (weight 1): works if at least 9 of 10 hold (the recipe: 5 of 10 at
+        seeds 6–15); fails at 6 or fewer.
+      - (b) lean: residual input, jitter, tails, InfoNCE on uniform batches and sufficiency, with no code batches and
+        no prediction term: works if it holds at least as often as the recipe (5 of 10 or more) with no style
+        above .10; then it is the candidate for the paper's recipe.
+  - **Expectation, written before:** calibration succeeds (item 27's simulation showed this pattern at 10 units).
+    Sufficiency holds in 8 or more of 10 toy seeds; lean holds about as often but may cost the strong parts some
+    precision without the prediction term.
+- **Stage 76 (rules written 25 Nov before any of its results; the user asked for both parts, the Run:ai jobs
+  included; part A read 25 Nov, item 60: fails at 9 and 10 units; part B read 26 Nov, item 61: both rules work on
+  ten new 8-unit runs): does the leftover detector hold on codes it never saw, and does "keep the run with the
+  lowest ρ1" pick holders among new runs?**
+  - **Why.** In stage 75 (item 59), ρ1 told failing codes from holders in all 44 within-cell pairs, but on the 45
+    codes that motivated it. Two tests on codes it never saw.
+  - **Numbering.** The other session pushed its own stages 73 (why stage 68's evaluated code dipped) and 74 (a
+    content-size sweep) on 25 Nov. The merge and leftover stage built here as 73 is renumbered 75, and this one is 76.
+  - **ρ1** exactly as stage 75 (`pool_check.py detect`: same export, map, CCA and settings). Holds are recomputed from
+    each run's bundle with `own_directions.py`'s analysis and `holds.py`'s rule, and checked against a stage's verdict
+    where one exists.
+  - **A. Codes it never saw, no training:** the fixed bank's 9- and 10-unit codes with verdicts. 9 units rebuilt every
+    500 (seeds 42, 3, 4, 5; 3 hold) and every 100 (42, 3, 4, 5; 1 holds), stage 64; 10 units every 500 (42, 2, 3, 4,
+    5; 4 hold), stages 64–65. 13 codes, 8 holders, 5 failures, 10 within-cell pairs.
+    - **Rule:** holds up if the AUC (failures above holders) is at least .80 and at least 8 of the 10 within-cell pairs
+      are on the right side. Fails if the AUC is at most .65. Between: unresolved.
+    - **Described** (single seeds, no pairs): the fixed bank's uniform-batch 8- and 10-unit codes, the drawn bank's
+      10- and 11-unit codes, the independent fixed bank's 8-unit code. On the drawn bank the lesion's position is
+      shared content that the hold rule does not count, so a code can hold yet leave position behind.
+  - **B. New runs:** the frozen recipe (stages 56 and 64's 8-unit arm; flags as in
+    `runs/..._abl_codebatch_predict1_c8_20k_s2/report.json`: code batches of 31 neighbours rebuilt every 500,
+    residual, jitter 2, rotate 3, tails, prediction weight 1, patch weight 0, 20,000 steps, evals every 2,000) at ten
+    seeds never used on this bank, 6–15. Each is its own Run:ai job on one A100 (`runai_warm.sh`; names
+    `..._abl_codebatch_predict1_c8_20k_a100_sN`, labels `c8_ae500_sN`), then copied back, bundled
+    (`causal_bundle.py`) and read by `pool_check.py detect`. The cluster checkout is at the other session's `1bf7c96`;
+    its `warm.py` changes touch only `--real` readouts, a refactor of TailCode's pooling that keeps its arithmetic,
+    and `--keep-checkpoints`.
+    - **Detector rule:** works if the AUC is at least .80; fails at .65 or below; between: unresolved.
+    - **Selection rule** (the way it would be used: train K runs, keep the lowest ρ1): over all 120 subsets of 3 of
+      the 10 runs, the pick holds in at least 90% of the subsets that contain a holder: works. Below 70%: fails.
+      Between: unresolved.
+    - Both rules are judged only with at least 2 holders and 2 failures among the ten; otherwise described.
+    - **Described:** a random pick's rate in the same subsets; K = 2, 4 and 5; the ten runs' hold rate (from scratch
+      on the PC: 3/5); stage 75's ranges as a fixed cut (holders .19–.56, failures .45–.86).
+  - **Expectation, written before:** A holds up, AUC about .9: a spare unit holds a curve, which the map removes. B: 4
+    to 6 of 10 hold, AUC about .9, and the pick holds in about 95% of subsets with a holder.
+  - **Cost:** A: export 19 runs (about 5 minutes on the GPU), then about a minute a code. B: ten A100 jobs in
+    parallel, about 2–3 hours at stage 71a's pace (0.32–0.52 s a step), then about 20 minutes here.
+- **Stage 75 (no training; rules written 25 Nov before any code or result; the user asked for both checks; read 25
+  Nov, item 59: merge fails, detector works, repair fails; built as 73, renumbered because the other session's
+  stages 73 and 74 took those numbers): can the runs' codes be merged into one 8-unit code that holds, and does the
+  backbone's leftover past the code carry what a failing code lost?**
+  - **Why.**
+    - At 8 units about half of runs hold, and seven training changes did not move that (item 58). Whether a run holds
+      is settled along its trajectory: the same seed on two GPUs flipped the outcome at three of five seeds.
+    - Failing codes lose different directions (ventricle–burden, lr, sulcal); holders keep all seven. So the union of
+      a cell's runs holds everything even where most runs fail.
+    - The backbone still holds what a failing code lost. Seed 42's from-scratch run: GAP reads ventricle's own part
+      .81 / .66 and burden's .60 / .58; its code .43 / .41 and .30 / .32 (stage 56's own variation).
+    - Both checks use only the block claim's logic: what the two views share is content, and style is drawn per
+      view. No label is read except to score.
+  - **Codes:** the fixed bank's 45 finished 8-unit codes with hold verdicts, nine cells of five seeds (42, 2, 3, 4,
+    5): e500, e100 (stage 64), cont, red, pca (65), harm (60), tau1 (70), proj (71), aproj (71a). 17 hold; every cell
+    but tau1 has a holder. Labels and verdicts come from those stages' `holds.txt`.
+  - **Export** (`pool_check.py export`, GPU, reused while newer than the checkpoint): each run's code and backbone GAP
+    (64 channels) for its 2,000 training and 1,000 test subjects, both views, into `causal/pool/`. Every fit below uses
+    training subjects only (400 of them held out for early stopping where a network is fitted); every score is read
+    on the 1,000 test subjects: `own_directions.py`'s analysis per view, and holds as `holds.py` (the spectrum's last
+    value and the ventricle–burden worst direction each at least .40 in both views).
+  - **A. Merge.**
+    - Per cell, each run's code is standardized and whitened on its training subjects, both views stacked
+      (`compress_code.whiten`), and the five runs' whitened codes are stacked: 40 dimensions per view.
+    - A linear map to 8 units, shared by both views, feeds an MLP (8 → 128 → 128 → 40) that predicts the other view's
+      stacked codes. Five restarts; the one with the lowest validation loss is kept (label-free). The merged code is
+      the linear map's output on test subjects.
+    - Predicting the other view keeps the merged code to shared content. Curves need no unit, because the MLP can
+      rebuild them from the factors the 8 units hold.
+    - **Rule:** the merge works if the merged code holds in at least 7 of the 8 cells with a holder. It fails if it
+      holds in at most 4 of 8 (one run drawn at random holds in 17 of 40 here, so about 3.4 of 8). Between:
+      unresolved.
+    - **Described:** own parts against the cell's best holder and against `c10_e500_s42`; directions spent on curves;
+      the tau1 cell (no holder); each cell's failing runs merged alone (does a direction no single run holds come
+      back?); random subsets of 2 and 3 runs per cell (hold rate against the number of runs, for ADNI); the ten
+      projector runs together; the same-seed PC and A100 pairs; agreement among the restarts.
+  - **B. Leftover past the code.**
+    - Per code and view: a map from the code to the standardized GAP, least squares on the code and then RBF kernel
+      ridge on what that leaves (settings by 5-fold CV on training subjects). The leftover is the GAP minus that map,
+      out of fold on training subjects, so what the code holds, straight or curved, leaves with it.
+    - Changed before any real result: in the synthetic test a kernel ridge map alone shrank the linear part, and the
+      shrunk content is shared by the views, so a code holding all seven read ρ1 .82. With least squares first that
+      code reads .03, and a code that lost one part .98, its top leftover direction reading the lost part at .95.
+    - Regularized CCA between the two views' leftovers (ridge .1 of the mean variance), fitted on training subjects.
+      ρ1 is the held-out correlation of the top shared leftover direction on test subjects.
+    - **Detector rule:** ρ1 should be higher in failing codes. It works if the AUC over the 45 codes (failures against
+      holders) is at least .80 and at least 3/4 of within-cell holder–failure pairs are on the right side. It fails if
+      the AUC is at most .65. Between: unresolved. (Top-1 put 7–9 codes on the wrong side, item 58.)
+    - **Repair:** remove from the whitened code its most predictable direction (`compress_code.redundancy`, one step,
+      8 → 7, fitted on training codes) and add each view's top shared leftover direction: an 8-unit code.
+    - **Repair rule**, over the eight cells other than tau1 (its codes keep only 3–4 own directions, so one swap
+      cannot fix them; described only): the repair works if at least 16 of the 23 failing codes hold afterwards and
+      at most 1 of the 17 holders stops holding. It fails if at most 7 of 23 failing codes hold. Between: unresolved.
+    - **Described:** what the top leftover direction reads (each own part by ridge, test subjects), ρ2, the GAP's own
+      CCA beside the leftover's, and what the redundancy step removed (boosted from the factors, as
+      `own_directions.py` reads a curve).
+  - **Expectation, written before any result:**
+    - Merge: holds in 7 or 8 of 8. Holders' codes carry all seven linearly, and the MLP rebuilds the curves. The
+      likeliest miss is item 27's finite-sample effect, the MLP failing to rebuild a curve so that a unit is spent on
+      it; that shows as a merged code with two curves. Failing runs merged alone hold in about half of the cells,
+      because most failures lose the same ventricle–burden direction.
+    - Detector: AUC around .75–.85. Holders leave some shared leftover too (their weakest own part reads about .5 in
+      the code and higher in the backbone), so the separation is partial.
+    - Repair: about half of failing codes hold. The leftover should carry burden's own part where the backbone does
+      (.58–.60), but one direction may mix ventricle's and burden's leftovers. Holders keep holding, since the
+      removed direction is brain's curve.
+  - **Cost:** the export about 20 s a run on the GPU (about 15 minutes). Then CPU only, run alone: merges take
+    minutes a cell; kernel ridge, CCA and one redundancy step take under a minute a code; the scoring about 20 s a
+    code and view. Under two hours in all.
+  - **Checked locally (25 Nov):** `tests/test_pool_check.py`, 9 tests on synthetic codes (seven independent own
+    parts, codes that hold some of them behind a mixing the views share, curves of brain, view noise; backbone-like
+    features with every part, a curve and per-view style):
+    - The merge keeps what holders hold (every part R² > .8), recovers parts no single run holds from failures that
+      lose different ones (> .7), and cannot invent a part no run holds (< .1).
+    - The leftover of a code that lost a part shares it across views (ρ1 > .8, top direction reading it > .7), at
+      least .2 above a code that holds all; style alone shares nothing (|ρ1| < .2).
+    - The repair removes a curve (R² > .8 from the curves) and then holds every part (> .6); on a holder it removes
+      brain's curve and keeps every part (> .8). Holds reads the ventricle–burden plane; names and verdict parsing.
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 75` (export, then `pool_check.py run` into
+    `causal/stage75/`).
 - **Stage 72 (no training; built 25 Nov, the user asked for it): can a seventh shared local direction be measured
   without labels?** A suggestion from another assistant (Codex), passed on by the user on 25 Nov: train the 8 units to
   keep seven local changes that both scans agree on, in place of InfoNCE. It proposed checking first that the signal
@@ -2057,8 +2412,8 @@ bash out/burden_feasibility_20261102/runai_submit.sh --dry-run
     - Added after these tests: k = 128, described only. The pass rule is unchanged (k = 32 and 64). The tests also
       make k = 32 look harder than the expectation above assumed, and a loss on 32-subject batches would meet the
       same noise.
-- **Stage 71 (built 25 Nov after item 56; the user asked to try it): does a projector head make 8 units
-  reliable?**
+- **Stage 71 (built 25 Nov after item 56; the user asked to try it; read 25 Nov, item 58: no better, holds 2/5):
+  does a projector head make 8 units reliable?**
   - **Why.**
     - The cosine reads the code directly, so every standardized unit counts alike, and a curve costs one of the
       code's units. A head between the code and the loss can bend factors and weight units itself, so the InfoNCE no
@@ -2144,15 +2499,37 @@ bash out/burden_feasibility_20261102/runai_submit.sh --dry-run
     on the code at every seed, but the head's linearity is still 1.000 in both views. So far it reweights or mixes
     units through its linear part and does not bend. If it stays linear, the arm tests a learned reweighting, not
     bending after the code.
+  - **Interim, step 12,000** (25 Nov 13:09; the PC's five; not the verdict, which reads own parts at step 20,000):
+    - The head has barely bent: linearity .995–.999.
+    - Seeds 2, 3 and 5, which hold from scratch, track their twins: sulcal .61 / .71 / .57 against .61 / .75 / .63,
+      ventricle .86 against .86–.89.
+    - Seeds 42 and 4, which fail from scratch, lag on sulcal (.42 and .33 against .74 and .69) and temporal (.74
+      against .89 both). Ventricle runs slightly ahead (.83 and .84 against .79 and .82). So far that looks like
+      trading which direction goes rather than rescue. Sulcal was still rising in the twins to step 20,000.
+  - **Interim, step 18,000** (25 Nov 14:12; factor readouts, mean of the views; not the verdict):
+    - PC: linearity .983–.995, bending a little since step 12,000. Seeds 3 and 5 track their twins (sulcal .78 / .73
+      against .79 / .76). Seed 2 trails on sulcal (.65 against .75). Seed 42: sulcal .68 against .77, ventricle .85
+      against .82. Seed 4: sulcal .39 against .75, temporal .77 against .90, lr .64 against .57.
+    - A100 (latest eval): the same seed left its PC run by step 8,000 (seed 4's sulcal .46 against .19, seed 2's .56
+      against .39), as a new draw would. Seed 3 finished with ventricle .84, against .92 for its PC run and its twin.
+      Seed 42 stalls on sulcal (.36 at step 14,000). Seed 2 reads sulcal .82 at step 18,000, above both. Seed 4 at
+      step 12,000 reads sulcal .71 and lr .79, ahead of its PC run (.33, .70).
+    - Sulcal is the factor these codes lose most often, where the from-scratch failures lost ventricle–burden (42)
+      and lr (4). The jobs ran at 0.32–0.50 s/step, slower than the timing job's 0.30, likely on shared nodes.
   - **A100 replicate** (25 Nov, the user's request; fixed before any of its results):
     - The same five seeds and flags as five separate Run:ai jobs, one A100 each, alongside the PC (`runai_warm.sh`).
-      Names `..._abl_codebatch_predict1_proj64_c8_20k_a100[_sN]`, labels `c8_proj64a_sN`.
+      Names `..._abl_codebatch_predict1_proj64_c8_20k_a100[_sN]`, labels `c8_aproj64_sN`. (Fixed first as
+      `c8_proj64a_sN`, renamed before any result because `holds.py` only parses an arm of letters then digits.)
     - The same seed reproduces on the same GPU, but a different GPU changes the trajectory the way a new seed does
       (timing job). So these are five more draws of the arm, not copies of the PC's.
     - How they are read: the stage's verdict stays on the PC's five, paired with the PC's from-scratch codes. The
       replicate's hold and match counts are reported beside them, and the ten codes pooled, described only. Its
       curve counts and costs are read as for the PC's arm, also described.
-    - Its runs are copied back for the same reports once both sets finish.
+    - Its runs are copied back for the same reports once both sets finish: `run_pc.sh 71a` (no training; needs the
+      runs and logs in `runs/` and `logs/`), into `causal/stage71a/`, after stage 71's reports and not beside them.
+      It reuses stage 71's audits for the fifteen PC codes and bundles, so only the five A100 codes are audited anew.
+      `holds.py` compares each set with from scratch and the two sets with each other; the ten pooled are the sum of
+      the two per-cell counts. `bash -n` and the dry run pass.
 - **Stage 70 (built 25 Nov; rules and the factor of 10 agreed by the user; started 25 Nov 05:48; read 25 Nov, item
   56: worse, holds 0/5): does a higher
   InfoNCE temperature make 8 units reliable?** On 25 Nov the user declined the anchors as a seed rule, asked for
@@ -3664,10 +4041,37 @@ to scans through the manifest's IDs and dates.
 - **Stage 72 is read (item 57): fail.** The suggested local loss (seven local changes both scans agree on, from
   another assistant via the user) would not target the missing factor. A held weak factor adds no more local shared
   variation than a failure's curve leaves, and a shared artifact adds more. Do not build it in this form.
-- **Running:** stage 71, the from-scratch 8-unit arm with a projector head shared by both views (`warm.py
-  --projector 64`, output at the code's 8 units), seeds 42, 2, 3, 4, 5, then the reports one at a time (section 9;
-  rules fixed there before the run). The user asked to try it after item 56. A matched-width head keeps Yao's setup;
-  this corrects the bullet above that says a projector leaves it. Stage 68 waits for the GPU.
+- **Stage 71 is read (item 58): a projector head makes 8 units no better.** Holds 2/5 and matches 1/5 against 3/5
+  and 2/5 from scratch; it rescues neither failure, loses seed 2, keeps two curves in every failing code, and never
+  bends (linearity .98–.99). No cost to top-1 or style. A matched-width head keeps Yao's setup; this corrects the
+  bullet above that says a projector leaves it.
+- **Stage 75 is read (item 59): the shared leftover detects failing codes; merge and repair fail.** ρ1 (what the
+  two views' backbone features still share once regressed on the code) is higher in every failing code than in
+  every holder of its cell (44 of 44 pairs, AUC .97), so the lowest ρ1 per cell holds in 8 of 8 cells. Merging a
+  cell's runs holds in 4 of 8 cells and the repair fixes 4 of 23 failures: both fail their rules. Next, if the user
+  wants it: test ρ1 as a seed rule on runs it never saw (new seeds; other banks and widths), then ADNI.
+- **Stage 77 (section 9):** step 1, the toy, stopped (item 62: its calibration found no setting where 12 units hold
+  and 8 fail). The user chose to go straight on. Step 2 is built (`warm.py --sufficiency-weight`, 6 tests, smoke runs).
+  **Running:** step 3, twenty Run:ai jobs submitted 26 Nov 10:49 (`burden-s77-suff-s16…25`, `burden-s77-lean-s16…25`).
+  When all log DONE: copy `runs/` and `logs/` back (`..._suff1_c8_20k_a100_sN`), then `run_pc.sh 77b`.
+- **Stage 76 is read (the user asked for both parts; rules written before any of its results):**
+  - A (item 60): at 9 and 10 units the detector fails its rule (AUC .55, 7 of 10 within-cell pairs).
+  - B (item 61): on ten new 8-unit runs (seeds 6–15, A100s) 5 hold, and both rules work: AUC 1.00 (25 of 25
+    pairs), and the lowest ρ1 among any three runs holds whenever one of them does (110 of 110). At the matched
+    width the rule is now 69 of 69 within-cell pairs, 25 of them on runs it never saw.
+  - The ten Run:ai jobs `burden-s76-a100-s6` … `-s15` (one A100 each, `runai_warm.sh`) ran 25 Nov 23:00 to 26 Nov
+    03:35; their runs and logs are copied back (`..._abl_codebatch_predict1_c8_20k_a100_sN`), and `run_pc.sh 76b`
+    scored them (log `run_pc_76b.log`).
+- **The other session (25 Nov):** it pushed `c8cfef3` (its stage 74, a content-size sweep with Run:ai submission)
+  and `1bf7c96` (its stage 73, why stage 68's evaluated code dipped) on top of `d3f7d74`; the cluster checkout is at
+  `1bf7c96`, and its jobs `burden-s74-width-s3/s4/s42` show as Failed on Run:ai (not looked into here). This
+  checkout's branch has `3bea16d` (not pushed) and today's uncommitted work (stages 71a, 75, 76; items 58–59), so
+  the next commit needs a merge with `fork/temporal009-attention-full-width`: both sides edit `HANDOFF.md`,
+  `run_pc.sh` and `warm.py`. My stages were renumbered 75 and 76 so that none collides with the other session's.
+- **Stage 71a is read (item 58, A100 replicate):** holds 1/5 (seed 2), 3/10 pooled with the PC's five; no seed held
+  on both GPUs. Reports ran 17:04–18:05 (`run_pc_71a.log`, `causal/stage71a/`). The main checkout was fast-forwarded to
+  `sync-25nov` (3bea16d) once stage 71 exited and the scratch worktree was removed; HANDOFF and `run_pc.sh` carry
+  uncommitted edits since (stage 71a, items 58, interims).
 - **Code and Run:ai, 25 Nov (the user asked to commit and to set up Run:ai for these stages):**
   - Committed `4896045` (stages 70–72). The remote branch had 4 commits from another machine (stage 68's ADNI export,
     `warm.py --real`, `runai_submit.sh` and `runai_job.sh`, the paper plan). They were merged in a scratch worktree, so
