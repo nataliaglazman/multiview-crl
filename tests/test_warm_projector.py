@@ -114,5 +114,55 @@ class ProjectorHeadTests(unittest.TestCase):
         self.assertTrue(head.training)  # restored
 
 
+
+class WideProjectorTests(unittest.TestCase):
+    """--projector-out (stage 83): the head's output wider than the code, the InfoNCE on every output unit."""
+
+    def test_options_reject_a_narrow_or_lone_output(self):
+        out = "/nonexistent/stage83_out"
+        cases = [
+            ["--projector-out", "16", "--content-units", "8"],  # no head
+            ["--projector", "64", "--projector-out", "16"],  # no --content-units
+            ["--projector", "64", "--projector-out", "6", "--content-units", "8"],  # narrower than the code
+        ]
+        for extra in cases:
+            argv = [out if x == "OUT" else x for x in BASE] + extra
+            with self.subTest(extra=extra), mock.patch.object(sys, "argv", argv):
+                with self.assertRaisesRegex(ValueError, "--projector-out"):
+                    warm.main()
+        self.assertFalse(Path(out).exists())
+
+    def test_the_wide_head_starts_with_the_code_and_varies_everywhere(self):
+        rng = np.random.default_rng(4)
+        torch.manual_seed(0)
+        head = warm.Projector(8, 16, out=16).train()
+        pair = ProjectorHeadTests.pair(None, rng)
+        out = head(pair)
+        self.assertEqual(tuple(out.shape), (2, 32, 16))
+        torch.testing.assert_close(
+            T.standardize_contrastive_code(out[..., :8]), T.standardize_contrastive_code(pair), atol=1e-4, rtol=1e-4
+        )
+        self.assertTrue(bool((out[..., 8:].std(1) > 1e-3).all()))  # no constant unit for the standardization
+
+    def test_at_the_codes_width_the_head_is_stage_71s(self):
+        torch.manual_seed(0)
+        narrow = warm.Projector(8, 16)
+        torch.manual_seed(0)
+        same = warm.Projector(8, 16, out=8)
+        for a, b in zip(narrow.state_dict().values(), same.state_dict().values()):
+            torch.testing.assert_close(a, b)
+
+    def test_the_wide_loss_reads_every_output_unit(self):
+        rng = np.random.default_rng(5)
+        torch.manual_seed(0)
+        head = warm.Projector(8, 16, out=16).train()
+        pair = ProjectorHeadTests.pair(None, rng).requires_grad_(True)
+        sim = torch.nn.CosineSimilarity(dim=-1)
+        loss = warm.hard_negative_infonce(torch.cat(list(head(pair))), 16, 0.1, 0.0, sim)
+        loss.backward()
+        self.assertTrue(torch.isfinite(loss))
+        self.assertGreater(float(head.linear.weight.grad[8:].abs().sum()), 0)  # the extra outputs carry gradient
+
+
 if __name__ == "__main__":
     unittest.main()

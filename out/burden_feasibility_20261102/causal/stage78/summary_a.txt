@@ -1,0 +1,43 @@
+Stage 78: each code read with the gauge's stored averages (s) and with the gauge recomputed over the 2,000
+clean training images (r). Holds: the spectrum's last value and the ventricle-burden worst direction each
+>= .40 in both views; margin = the smallest of the four. top-1: among all test subjects. Distances, T1/FLAIR,
+over the 448 pooled features: |offset| = mean |stored - recomputed mean| in recomputed SDs; log var = mean of
+log(stored / recomputed variance), below 0 = stored narrower. lin R2: the recomputed code's least-squares
+fit from the stored one, worst unit, T1/FLAIR.
+
+== part A (10 codes)
+  code             holds s>r  margin s > r     rho1 s > r  top-1 s > r  |offset|   log var      lin R2   
+  c8_ae500_s6      yes > yes   0.62 >  0.59  0.34 > 0.25  0.772 > 0.768  0.31/0.26  +0.01/-0.26  0.86/0.90
+  c8_ae500_s7      no  > no   -0.00 > -0.01  0.68 > 0.59  0.716 > 0.594  0.27/0.30  -0.09/-0.12  0.93/0.93
+  c8_ae500_s8      no  > no    0.01 >  0.01  0.67 > 0.63  0.864 > 0.765  0.33/0.32  +0.07/-0.21  0.93/0.94
+  c8_ae500_s9      no  > no   -0.02 > -0.02  0.58 > 0.55  0.668 > 0.698  0.43/0.41  +0.17/+0.05  0.88/0.91
+  c8_ae500_s10     yes > yes   0.58 >  0.55  0.36 > 0.28  0.803 > 0.575  0.32/0.27  +0.03/-0.27  0.94/0.94
+  c8_ae500_s11     yes > yes   0.54 >  0.54  0.41 > 0.03  0.630 > 0.737  0.64/0.49  +0.54/+0.17  0.90/0.95
+  c8_ae500_s12     yes > yes   0.52 >  0.54  0.44 > 0.32  0.802 > 0.707  0.33/0.27  -0.11/-0.46  0.89/0.92
+  c8_ae500_s13     yes > yes   0.46 >  0.43  0.32 > 0.15  0.829 > 0.705  0.28/0.33  +0.01/+0.06  0.90/0.95
+  c8_ae500_s14     no  > no   -0.01 > -0.01  0.67 > 0.58  0.610 > 0.669  0.41/0.39  +0.16/+0.05  0.90/0.88
+  c8_ae500_s15     no  > no    0.26 >  0.26  0.46 > 0.24  0.633 > 0.694  0.40/0.35  +0.14/-0.08  0.90/0.90
+  VERDICTS: no effect; holds 5 stored, 5 recomputed of 10; flips to hold none, to fail none; margins moved by >= 0.05: none
+  RHO1 (stored): AUC 1.00 over 5 failures and 5 holders; within-cell pairs right 25/25; lowest rho1 of 3 holds in 110/110 subsets with a holder (random 60.0): stands
+  RHO1 (recomputed): AUC 0.88 over 5 failures and 5 holders; within-cell pairs right 22/25; lowest rho1 of 3 holds in 95/110 subsets with a holder (random 60.0): unresolved
+
+== all codes: VERDICTS no effect
+  within-cell pairs right (stored): 25/25
+  within-cell pairs right (recomputed): 22/25
+  rho1 stored against recomputed: Spearman 0.82, largest change 0.38; top-1 changes by -0.042 on average
+  stored rho1 against the stages' own reports: largest difference 0.0000
+
+== described: where the stored averages come from (log variance ratio, all features, T1/FLAIR)
+  code             stored/hood  hood/pop     stored/pop   one batch mean, RMS offset
+  c8_ae500_s6      +0.86/+0.75  -0.85/-1.01  +0.01/-0.26  0.52/0.54 SDs
+  c8_ae500_s7      +0.68/+0.69  -0.76/-0.81  -0.09/-0.12  0.54/0.55 SDs
+  c8_ae500_s8      +0.86/+0.69  -0.79/-0.90  +0.07/-0.21  0.54/0.56 SDs
+  c8_ae500_s9      +0.98/+0.92  -0.81/-0.86  +0.17/+0.05  0.53/0.54 SDs
+  c8_ae500_s10     +0.87/+0.69  -0.84/-0.96  +0.03/-0.27  0.52/0.55 SDs
+  c8_ae500_s11     +1.23/+0.99  -0.69/-0.82  +0.54/+0.17  0.51/0.54 SDs
+  c8_ae500_s12     +0.76/+0.53  -0.87/-0.99  -0.11/-0.46  0.50/0.51 SDs
+  c8_ae500_s13     +0.80/+0.94  -0.79/-0.88  +0.01/+0.06  0.51/0.52 SDs
+  c8_ae500_s14     +0.86/+0.79  -0.70/-0.74  +0.16/+0.05  0.50/0.52 SDs
+  c8_ae500_s15     +0.93/+0.81  -0.78/-0.88  +0.14/-0.08  0.51/0.52 SDs
+
+Saved out/burden_feasibility_20261102/causal/stage78/summary_a.json

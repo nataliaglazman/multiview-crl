@@ -1,0 +1,25 @@
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_predict1_c8_20k.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_uni_s42       fails  last -0.01/-0.01  worst 0.20/0.18  rho1 0.68 rho2 0.44
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_predict1_c10_20k.npz {'code_train': (2, 2000, 10), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 10), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c10_uni_s42      fails  last 0.02/0.03  worst 0.25/0.23  rho1 0.47 rho2 0.48
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_predict1_c10_20k_s2.npz {'code_train': (2, 2000, 10), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 10), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c10_uni_s2       fails  last 0.12/0.08  worst 0.24/0.24  rho1 0.62 rho2 0.47
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c10_20k.npz {'code_train': (2, 2000, 10), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 10), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c10_drawn_s42    fails  last -0.02/-0.02  worst 0.08/0.08  rho1 0.71 rho2 0.64
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c10_20k_s2.npz {'code_train': (2, 2000, 10), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 10), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c10_drawn_s2     fails  last -0.03/-0.03  worst 0.09/0.09  rho1 0.65 rho2 0.73
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c11_20k.npz {'code_train': (2, 2000, 11), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 11), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c11_drawn_s42    fails  last -0.03/-0.02  worst 0.22/0.22  rho1 0.74 rho2 0.55
+EXPORT ssl_uni_jitter_nopatch_restail_t104_nofield_fixedpos_abl_codebatch_predict1_c8_20k.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_indep_s42     fails  last 0.22/0.18  worst 0.75/0.75  rho1 0.77 rho2 0.60
+
+  c10_drawn    rho1 by rank (h holds, f fails): 0.65f < 0.71f; pairs right 0/0
+  c10_uni      rho1 by rank (h holds, f fails): 0.47f < 0.62f; pairs right 0/0
+  c11_drawn    rho1 by rank (h holds, f fails): 0.74f; pairs right 0/0
+  c8_indep     rho1 by rank (h holds, f fails): 0.77f; pairs right 0/0
+  c8_uni       rho1 by rank (h holds, f fails): 0.68f; pairs right 0/0
+
+  DETECTOR: AUC nan over 7 failures and 0 holders; within-cell pairs right 0/0 (needed 80%): described only (fewer than 2 holders or 2 failures)
+  stage 75's ranges as a cut: holders at or under .56 0/0, failures at or over .45 7/7; a cut at .50 classifies 6/7
+
+Saved out/burden_feasibility_20261102/causal/stage76/other_banks.json

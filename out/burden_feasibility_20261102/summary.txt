@@ -1022,6 +1022,78 @@ ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predic
   s16000 code +0.763 +0.788 | GAP +0.885 +0.902 | pool +0.719 +0.777 | brain 0.93 vent 0.85 thick 0.90 temp 0.89 lr 0.79 sulc 0.49 | global 0.602 | nbhd spread anat 0.52 pos 0.50
   s18000 code +0.787 +0.801 | GAP +0.899 +0.919 | pool +0.816 +0.843 | brain 0.93 vent 0.87 thick 0.90 temp 0.89 lr 0.80 sulc 0.50 | global 0.455 | nbhd spread anat 0.52 pos 0.51
   s20000 code +0.819 +0.823 | GAP +0.907 +0.920 | pool +0.847 +0.705 | brain 0.93 vent 0.88 thick 0.91 temp 0.90 lr 0.75 sulc 0.52 | global 0.401 | nbhd spread anat 0.51 pos 0.51
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_proj64_c8_20k
+  s    0 code +0.108 +0.239 | GAP +0.390 +0.406 | pool +0.401 +0.544 | brain 0.44 vent 0.21 thick 0.29 temp 0.19 lr 0.11 sulc 0.05 | global 
+  s 2000 code +0.393 +0.430 | GAP +0.568 +0.641 | pool +0.447 +0.497 | brain 0.90 vent 0.64 thick 0.79 temp 0.41 lr 0.05 sulc 0.07 | global 6.504 | nbhd spread anat 0.67 pos 0.53
+  s 4000 code +0.403 +0.445 | GAP +0.562 +0.668 | pool -1.377 +0.532 | brain 0.91 vent 0.67 thick 0.82 temp 0.57 lr 0.59 sulc 0.06 | global 4.060 | nbhd spread anat 0.58 pos 0.52
+  s 6000 code +0.413 +0.474 | GAP +0.604 +0.750 | pool +0.491 +0.532 | brain 0.92 vent 0.65 thick 0.87 temp 0.70 lr 0.85 sulc 0.11 | global 2.487 | nbhd spread anat 0.52 pos 0.45
+  s 8000 code +0.539 +0.572 | GAP +0.744 +0.803 | pool +0.550 +0.567 | brain 0.92 vent 0.71 thick 0.88 temp 0.70 lr 0.89 sulc 0.19 | global 1.564 | nbhd spread anat 0.52 pos 0.44
+  s10000 code +0.708 +0.711 | GAP +0.818 +0.868 | pool +0.694 +0.745 | brain 0.93 vent 0.77 thick 0.87 temp 0.70 lr 0.90 sulc 0.26 | global 0.979 | nbhd spread anat 0.51 pos 0.45
+  s12000 code +0.749 +0.767 | GAP +0.848 +0.882 | pool +0.464 +0.745 | brain 0.93 vent 0.83 thick 0.87 temp 0.75 lr 0.89 sulc 0.41 | global 0.715 | nbhd spread anat 0.52 pos 0.45
+  s14000 code +0.794 +0.818 | GAP +0.866 +0.893 | pool +0.643 +0.804 | brain 0.94 vent 0.82 thick 0.88 temp 0.83 lr 0.90 sulc 0.58 | global 0.578 | nbhd spread anat 0.51 pos 0.45
+  s16000 code +0.829 +0.823 | GAP +0.883 +0.902 | pool -102.436 +0.834 | brain 0.94 vent 0.85 thick 0.90 temp 0.86 lr 0.90 sulc 0.64 | global 0.495 | nbhd spread anat 0.51 pos 0.44
+  s18000 code +0.834 +0.832 | GAP +0.890 +0.902 | pool +0.600 +0.748 | brain 0.94 vent 0.85 thick 0.90 temp 0.88 lr 0.89 sulc 0.68 | global 0.453 | nbhd spread anat 0.51 pos 0.45
+  s20000 code +0.843 +0.864 | GAP +0.899 +0.920 | pool +0.766 +0.355 | brain 0.95 vent 0.84 thick 0.89 temp 0.88 lr 0.90 sulc 0.68 | global 0.376 | nbhd spread anat 0.51 pos 0.45
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_proj64_c8_20k_a100_s3
+  s    0 code +0.183 +0.256 | GAP +0.398 +0.410 | pool +0.401 +0.562 | brain 0.57 vent 0.26 thick 0.39 temp 0.19 lr 0.07 sulc 0.04 | global 
+  s 2000 code +0.353 +0.387 | GAP +0.521 +0.556 | pool +0.414 +0.113 | brain 0.89 vent 0.63 thick 0.80 temp 0.36 lr -0.01 sulc 0.07 | global 5.989 | nbhd spread anat 0.66 pos 0.54
+  s 4000 code +0.457 +0.463 | GAP +0.633 +0.693 | pool +0.511 -0.158 | brain 0.92 vent 0.71 thick 0.82 temp 0.76 lr 0.72 sulc 0.13 | global 3.748 | nbhd spread anat 0.57 pos 0.52
+  s 6000 code +0.646 +0.645 | GAP +0.783 +0.813 | pool +0.339 +0.755 | brain 0.93 vent 0.76 thick 0.88 temp 0.87 lr 0.87 sulc 0.33 | global 2.006 | nbhd spread anat 0.51 pos 0.44
+  s 8000 code +0.761 +0.722 | GAP +0.855 +0.883 | pool +0.632 +0.432 | brain 0.93 vent 0.79 thick 0.87 temp 0.88 lr 0.90 sulc 0.39 | global 1.309 | nbhd spread anat 0.49 pos 0.42
+  s10000 code +0.805 +0.789 | GAP +0.893 +0.908 | pool +0.789 +0.833 | brain 0.94 vent 0.80 thick 0.88 temp 0.91 lr 0.91 sulc 0.56 | global 0.906 | nbhd spread anat 0.49 pos 0.44
+  s12000 code +0.850 +0.817 | GAP +0.911 +0.920 | pool +0.711 +0.200 | brain 0.94 vent 0.81 thick 0.90 temp 0.92 lr 0.92 sulc 0.69 | global 0.718 | nbhd spread anat 0.49 pos 0.44
+  s14000 code +0.854 +0.839 | GAP +0.907 +0.925 | pool +0.800 +0.876 | brain 0.94 vent 0.84 thick 0.91 temp 0.94 lr 0.92 sulc 0.71 | global 0.619 | nbhd spread anat 0.50 pos 0.43
+  s16000 code +0.878 +0.841 | GAP +0.915 +0.924 | pool +0.774 +0.508 | brain 0.94 vent 0.83 thick 0.91 temp 0.94 lr 0.92 sulc 0.73 | global 0.571 | nbhd spread anat 0.49 pos 0.42
+  s18000 code +0.869 +0.866 | GAP +0.913 +0.933 | pool +0.810 +0.892 | brain 0.94 vent 0.83 thick 0.90 temp 0.92 lr 0.92 sulc 0.74 | global 0.494 | nbhd spread anat 0.49 pos 0.44
+  s20000 code +0.869 +0.845 | GAP +0.914 +0.925 | pool +0.827 +0.830 | brain 0.94 vent 0.84 thick 0.90 temp 0.93 lr 0.92 sulc 0.75 | global 0.439 | nbhd spread anat 0.49 pos 0.42
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_proj64_c8_20k_s2
+  s    0 code +0.099 +0.164 | GAP +0.360 +0.414 | pool +0.455 +0.583 | brain 0.36 vent 0.14 thick 0.28 temp 0.19 lr 0.07 sulc 0.09 | global 
+  s 2000 code +0.417 +0.418 | GAP +0.567 +0.618 | pool +0.457 -0.663 | brain 0.89 vent 0.65 thick 0.81 temp 0.41 lr -0.01 sulc 0.06 | global 5.959 | nbhd spread anat 0.67 pos 0.54
+  s 4000 code +0.419 +0.465 | GAP +0.649 +0.717 | pool +0.504 +0.350 | brain 0.91 vent 0.67 thick 0.84 temp 0.71 lr 0.40 sulc 0.09 | global 3.887 | nbhd spread anat 0.57 pos 0.50
+  s 6000 code +0.521 +0.583 | GAP +0.724 +0.815 | pool +0.531 +0.337 | brain 0.92 vent 0.74 thick 0.89 temp 0.84 lr 0.76 sulc 0.21 | global 2.084 | nbhd spread anat 0.52 pos 0.46
+  s 8000 code +0.747 +0.749 | GAP +0.848 +0.850 | pool -0.632 -4.174 | brain 0.94 vent 0.83 thick 0.89 temp 0.89 lr 0.81 sulc 0.40 | global 1.105 | nbhd spread anat 0.50 pos 0.46
+  s10000 code +0.801 +0.773 | GAP +0.885 +0.867 | pool +0.686 +0.805 | brain 0.94 vent 0.85 thick 0.91 temp 0.90 lr 0.83 sulc 0.53 | global 0.773 | nbhd spread anat 0.49 pos 0.48
+  s12000 code +0.825 +0.825 | GAP +0.898 +0.910 | pool +0.790 +0.807 | brain 0.94 vent 0.86 thick 0.92 temp 0.92 lr 0.83 sulc 0.60 | global 0.593 | nbhd spread anat 0.49 pos 0.48
+  s14000 code +0.865 +0.844 | GAP +0.914 +0.911 | pool +0.842 +0.840 | brain 0.94 vent 0.89 thick 0.91 temp 0.91 lr 0.86 sulc 0.60 | global 0.462 | nbhd spread anat 0.49 pos 0.49
+  s16000 code +0.865 +0.858 | GAP +0.920 +0.932 | pool +0.810 -13.820 | brain 0.93 vent 0.90 thick 0.92 temp 0.92 lr 0.88 sulc 0.66 | global 0.439 | nbhd spread anat 0.50 pos 0.51
+  s18000 code +0.872 +0.873 | GAP +0.926 +0.935 | pool +0.855 +0.910 | brain 0.94 vent 0.90 thick 0.91 temp 0.91 lr 0.86 sulc 0.63 | global 0.347 | nbhd spread anat 0.50 pos 0.52
+  s20000 code +0.869 +0.868 | GAP +0.927 +0.933 | pool -1.958 +0.906 | brain 0.94 vent 0.90 thick 0.92 temp 0.92 lr 0.87 sulc 0.68 | global 0.299 | nbhd spread anat 0.49 pos 0.53
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_proj64_c8_20k_s3
+  s    0 code +0.183 +0.256 | GAP +0.398 +0.410 | pool +0.401 +0.562 | brain 0.57 vent 0.26 thick 0.39 temp 0.19 lr 0.07 sulc 0.04 | global 
+  s 2000 code +0.402 +0.414 | GAP +0.521 +0.644 | pool +0.486 +0.540 | brain 0.89 vent 0.66 thick 0.82 temp 0.44 lr 0.08 sulc 0.06 | global 5.100 | nbhd spread anat 0.68 pos 0.55
+  s 4000 code +0.468 +0.478 | GAP +0.627 +0.763 | pool +0.476 +0.589 | brain 0.91 vent 0.70 thick 0.85 temp 0.77 lr 0.76 sulc 0.16 | global 3.819 | nbhd spread anat 0.55 pos 0.47
+  s 6000 code +0.542 +0.609 | GAP +0.744 +0.794 | pool +0.575 +0.665 | brain 0.93 vent 0.71 thick 0.86 temp 0.81 lr 0.84 sulc 0.34 | global 2.167 | nbhd spread anat 0.51 pos 0.44
+  s 8000 code +0.644 +0.620 | GAP +0.801 +0.841 | pool +0.594 +0.736 | brain 0.94 vent 0.75 thick 0.86 temp 0.85 lr 0.88 sulc 0.49 | global 1.251 | nbhd spread anat 0.50 pos 0.42
+  s10000 code +0.741 +0.737 | GAP +0.845 +0.889 | pool +0.760 +0.796 | brain 0.94 vent 0.82 thick 0.88 temp 0.87 lr 0.87 sulc 0.60 | global 0.816 | nbhd spread anat 0.49 pos 0.43
+  s12000 code +0.789 +0.790 | GAP +0.880 +0.914 | pool +0.736 +0.819 | brain 0.94 vent 0.85 thick 0.90 temp 0.90 lr 0.89 sulc 0.67 | global 0.634 | nbhd spread anat 0.49 pos 0.43
+  s14000 code +0.838 +0.856 | GAP +0.903 +0.923 | pool +0.818 +0.876 | brain 0.94 vent 0.90 thick 0.90 temp 0.88 lr 0.90 sulc 0.72 | global 0.536 | nbhd spread anat 0.50 pos 0.44
+  s16000 code +0.860 +0.876 | GAP +0.915 +0.930 | pool +0.868 +0.891 | brain 0.94 vent 0.93 thick 0.90 temp 0.88 lr 0.88 sulc 0.75 | global 0.448 | nbhd spread anat 0.49 pos 0.43
+  s18000 code +0.893 +0.898 | GAP +0.925 +0.934 | pool +0.888 +0.903 | brain 0.94 vent 0.92 thick 0.91 temp 0.89 lr 0.87 sulc 0.75 | global 0.352 | nbhd spread anat 0.50 pos 0.44
+  s20000 code +0.894 +0.901 | GAP +0.928 +0.932 | pool +0.872 +0.855 | brain 0.94 vent 0.93 thick 0.90 temp 0.89 lr 0.86 sulc 0.77 | global 0.301 | nbhd spread anat 0.51 pos 0.43
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_proj64_c8_20k_s4
+  s    0 code +0.077 +0.302 | GAP +0.417 +0.415 | pool +0.464 +0.595 | brain 0.35 vent 0.16 thick 0.23 temp 0.12 lr 0.07 sulc 0.02 | global 
+  s 2000 code +0.471 +0.476 | GAP +0.599 +0.690 | pool +0.531 +0.488 | brain 0.90 vent 0.67 thick 0.80 temp 0.62 lr 0.09 sulc 0.06 | global 5.366 | nbhd spread anat 0.63 pos 0.53
+  s 4000 code +0.546 +0.626 | GAP +0.794 +0.799 | pool +0.585 +0.450 | brain 0.92 vent 0.70 thick 0.85 temp 0.73 lr 0.67 sulc 0.08 | global 3.077 | nbhd spread anat 0.53 pos 0.49
+  s 6000 code +0.777 +0.790 | GAP +0.858 +0.876 | pool +0.789 -2.554 | brain 0.93 vent 0.74 thick 0.88 temp 0.77 lr 0.75 sulc 0.16 | global 1.632 | nbhd spread anat 0.52 pos 0.47
+  s 8000 code +0.829 +0.847 | GAP +0.889 +0.897 | pool +0.848 +0.873 | brain 0.93 vent 0.77 thick 0.88 temp 0.76 lr 0.79 sulc 0.18 | global 0.968 | nbhd spread anat 0.51 pos 0.47
+  s10000 code +0.852 +0.847 | GAP +0.903 +0.908 | pool +0.870 +0.883 | brain 0.92 vent 0.81 thick 0.90 temp 0.75 lr 0.74 sulc 0.20 | global 0.679 | nbhd spread anat 0.51 pos 0.49
+  s12000 code +0.863 +0.860 | GAP +0.922 +0.926 | pool +0.849 +0.604 | brain 0.92 vent 0.84 thick 0.91 temp 0.73 lr 0.71 sulc 0.30 | global 0.549 | nbhd spread anat 0.52 pos 0.49
+  s14000 code +0.860 +0.873 | GAP +0.923 +0.923 | pool +0.784 +0.887 | brain 0.94 vent 0.88 thick 0.89 temp 0.76 lr 0.67 sulc 0.36 | global 0.418 | nbhd spread anat 0.53 pos 0.49
+  s16000 code +0.860 +0.883 | GAP +0.922 +0.924 | pool +0.887 +0.907 | brain 0.93 vent 0.90 thick 0.91 temp 0.76 lr 0.64 sulc 0.38 | global 0.368 | nbhd spread anat 0.53 pos 0.50
+  s18000 code +0.889 +0.887 | GAP +0.929 +0.928 | pool +0.893 +0.907 | brain 0.93 vent 0.90 thick 0.90 temp 0.76 lr 0.63 sulc 0.38 | global 0.319 | nbhd spread anat 0.53 pos 0.49
+  s20000 code +0.875 +0.884 | GAP +0.927 +0.920 | pool +0.853 -0.060 | brain 0.93 vent 0.91 thick 0.90 temp 0.77 lr 0.64 sulc 0.36 | global 0.259 | nbhd spread anat 0.54 pos 0.52
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_proj64_c8_20k_s5
+  s    0 code +0.127 +0.207 | GAP +0.401 +0.433 | pool +0.357 +0.599 | brain 0.36 vent 0.17 thick 0.31 temp 0.24 lr 0.16 sulc 0.06 | global 
+  s 2000 code +0.415 +0.421 | GAP +0.598 +0.641 | pool +0.488 +0.480 | brain 0.89 vent 0.65 thick 0.81 temp 0.33 lr 0.06 sulc 0.05 | global 6.144 | nbhd spread anat 0.66 pos 0.54
+  s 4000 code +0.445 +0.451 | GAP +0.645 +0.664 | pool +0.164 +0.553 | brain 0.91 vent 0.68 thick 0.84 temp 0.76 lr 0.65 sulc 0.09 | global 3.852 | nbhd spread anat 0.56 pos 0.51
+  s 6000 code +0.570 +0.541 | GAP +0.725 +0.815 | pool +0.580 +0.609 | brain 0.93 vent 0.77 thick 0.87 temp 0.83 lr 0.82 sulc 0.32 | global 1.929 | nbhd spread anat 0.51 pos 0.45
+  s 8000 code +0.706 +0.696 | GAP +0.816 +0.863 | pool +0.699 +0.702 | brain 0.93 vent 0.81 thick 0.90 temp 0.85 lr 0.81 sulc 0.33 | global 1.086 | nbhd spread anat 0.51 pos 0.47
+  s10000 code +0.698 +0.709 | GAP +0.853 +0.896 | pool +0.395 +0.783 | brain 0.93 vent 0.83 thick 0.89 temp 0.84 lr 0.79 sulc 0.36 | global 0.764 | nbhd spread anat 0.51 pos 0.45
+  s12000 code +0.798 +0.815 | GAP +0.884 +0.919 | pool +0.736 +0.704 | brain 0.93 vent 0.86 thick 0.91 temp 0.89 lr 0.83 sulc 0.51 | global 0.516 | nbhd spread anat 0.50 pos 0.44
+  s14000 code +0.837 +0.842 | GAP +0.907 +0.917 | pool -221.062 +0.808 | brain 0.93 vent 0.87 thick 0.91 temp 0.91 lr 0.87 sulc 0.63 | global 0.453 | nbhd spread anat 0.50 pos 0.45
+  s16000 code +0.857 +0.866 | GAP +0.918 +0.932 | pool +0.859 +0.899 | brain 0.94 vent 0.90 thick 0.91 temp 0.92 lr 0.85 sulc 0.69 | global 0.365 | nbhd spread anat 0.50 pos 0.43
+  s18000 code +0.869 +0.871 | GAP +0.926 +0.926 | pool +0.855 +0.876 | brain 0.94 vent 0.90 thick 0.91 temp 0.93 lr 0.88 sulc 0.71 | global 0.303 | nbhd spread anat 0.50 pos 0.43
+  s20000 code +0.849 +0.874 | GAP +0.917 +0.928 | pool +0.526 +0.820 | brain 0.94 vent 0.91 thick 0.91 temp 0.93 lr 0.86 sulc 0.71 | global 0.272 | nbhd spread anat 0.50 pos 0.45
 ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_tau1_c8_20k
   s    0 code +0.108 +0.239 | GAP +0.390 +0.406 | pool +0.401 +0.544 | brain 0.44 vent 0.21 thick 0.29 temp 0.19 lr 0.11 sulc 0.05 | global 
   s 2000 code +0.441 +0.442 | GAP +0.665 +0.632 | pool -1.147 +0.496 | brain 0.91 vent 0.66 thick 0.81 temp 0.65 lr 0.24 sulc 0.08 | global 5.958 | nbhd spread anat 0.60 pos 0.53

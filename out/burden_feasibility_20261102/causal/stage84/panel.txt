@@ -1,0 +1,151 @@
+== A. Cross-seed completeness: each code's score is the minimum, over the rest of its cell, of q(A | B), the
+   share of B's shared content (as B's other view reads it) that A's code explains in its worst direction.
+
+  c8_e500: pairs right 6/6 (median variant 6/6)
+    c8_e500_s5       holds  score +0.91  median +0.93  ceiling 0.79  shared k 8  rho1 0.30
+    c8_e500_s3       holds  score +0.90  median +0.95  ceiling 0.84  shared k 8  rho1 0.41
+    c8_e500_s2       holds  score +0.86  median +0.91  ceiling 0.80  shared k 8  rho1 0.41
+    c8_e500_s4       fails  score +0.51  median +0.55  ceiling 0.82  shared k 8  rho1 0.62
+    c8_e500_s42      fails  score +0.45  median +0.48  ceiling 0.81  shared k 8  rho1 0.59
+    K = 2: 9 subsets have a holder; the top score holds in 9 of them, a random pick in 6.0
+    K = 3: 10 subsets have a holder; the top score holds in 10 of them, a random pick in 6.0
+    K = 4: 5 subsets have a holder; the top score holds in 5 of them, a random pick in 3.0
+
+  c8_e100: pairs right 6/6 (median variant 6/6)
+    c8_e100_s3       holds  score +0.86  median +0.94  ceiling 0.81  shared k 8  rho1 0.36
+    c8_e100_s4       holds  score +0.82  median +0.90  ceiling 0.78  shared k 8  rho1 0.32
+    c8_e100_s42      fails  score +0.69  median +0.80  ceiling 0.79  shared k 8  rho1 0.58
+    c8_e100_s5       fails  score +0.55  median +0.61  ceiling 0.81  shared k 8  rho1 0.58
+    c8_e100_s2       fails  score +0.53  median +0.60  ceiling 0.80  shared k 8  rho1 0.67
+    K = 2: 7 subsets have a holder; the top score holds in 7 of them, a random pick in 4.0
+    K = 3: 9 subsets have a holder; the top score holds in 9 of them, a random pick in 4.0
+    K = 4: 5 subsets have a holder; the top score holds in 5 of them, a random pick in 2.0
+
+  c8_cont: pairs right 6/6 (median variant 6/6)
+    c8_cont_s3       holds  score +0.91  median +0.95  ceiling 0.84  shared k 8  rho1 0.46
+    c8_cont_s5       holds  score +0.89  median +0.93  ceiling 0.77  shared k 8  rho1 0.19
+    c8_cont_s2       holds  score +0.86  median +0.92  ceiling 0.81  shared k 8  rho1 0.34
+    c8_cont_s42      fails  score +0.63  median +0.65  ceiling 0.81  shared k 8  rho1 0.67
+    c8_cont_s4       fails  score +0.48  median +0.52  ceiling 0.83  shared k 8  rho1 0.59
+    K = 2: 9 subsets have a holder; the top score holds in 9 of them, a random pick in 6.0
+    K = 3: 10 subsets have a holder; the top score holds in 10 of them, a random pick in 6.0
+    K = 4: 5 subsets have a holder; the top score holds in 5 of them, a random pick in 3.0
+
+  c8_pca: pairs right 5/6 (median variant 6/6)
+    c8_pca_s42       holds  score +0.87  median +0.89  ceiling 0.83  shared k 8  rho1 0.56
+    c8_pca_s2        fails  score +0.84  median +0.88  ceiling 0.86  shared k 8  rho1 0.86
+    c8_pca_s5        holds  score +0.83  median +0.92  ceiling 0.83  shared k 8  rho1 0.56
+    c8_pca_s3        fails  score +0.79  median +0.82  ceiling 0.84  shared k 8  rho1 0.75
+    c8_pca_s4        fails  score +0.37  median +0.46  ceiling 0.81  shared k 8  rho1 0.82
+    K = 2: 7 subsets have a holder; the top score holds in 7 of them, a random pick in 4.0
+    K = 3: 9 subsets have a holder; the top score holds in 7 of them, a random pick in 4.0
+    K = 4: 5 subsets have a holder; the top score holds in 4 of them, a random pick in 2.0
+
+  c8_red: pairs right 6/6 (median variant 6/6)
+    c8_red_s5        holds  score +0.93  median +0.96  ceiling 0.83  shared k 8  rho1 0.44
+    c8_red_s42       holds  score +0.93  median +0.95  ceiling 0.84  shared k 8  rho1 0.41
+    c8_red_s2        holds  score +0.93  median +0.95  ceiling 0.84  shared k 8  rho1 0.45
+    c8_red_s3        fails  score +0.81  median +0.84  ceiling 0.83  shared k 8  rho1 0.66
+    c8_red_s4        fails  score +0.65  median +0.67  ceiling 0.84  shared k 8  rho1 0.53
+    K = 2: 9 subsets have a holder; the top score holds in 9 of them, a random pick in 6.0
+    K = 3: 10 subsets have a holder; the top score holds in 10 of them, a random pick in 6.0
+    K = 4: 5 subsets have a holder; the top score holds in 5 of them, a random pick in 3.0
+
+  c8_harm: pairs right 4/4 (median variant 4/4)
+    c8_harm_s2       holds  score +0.90  median +0.95  ceiling 0.76  shared k 8  rho1 0.22
+    c8_harm_s5       fails  score +0.75  median +0.81  ceiling 0.76  shared k 8  rho1 0.45
+    c8_harm_s4       fails  score +0.29  median +0.48  ceiling 0.82  shared k 8  rho1 0.59
+    c8_harm_s3       fails  score +0.27  median +0.52  ceiling 0.71  shared k 7  rho1 0.47
+    c8_harm_s42      fails  score +0.23  median +0.39  ceiling 0.57  shared k 8  rho1 0.54
+    K = 2: 4 subsets have a holder; the top score holds in 4 of them, a random pick in 2.0
+    K = 3: 6 subsets have a holder; the top score holds in 6 of them, a random pick in 2.0
+    K = 4: 4 subsets have a holder; the top score holds in 4 of them, a random pick in 1.0
+
+  c8_tau1: pairs right 0/0 (median variant 0/0)
+    c8_tau1_s42      fails  score +0.45  median +0.79  ceiling 0.92  shared k 8  rho1 0.80
+    c8_tau1_s5       fails  score +0.38  median +0.52  ceiling 0.80  shared k 8  rho1 0.87
+    c8_tau1_s2       fails  score +0.32  median +0.75  ceiling 0.94  shared k 8  rho1 0.79
+    c8_tau1_s3       fails  score +0.29  median +0.32  ceiling 0.92  shared k 8  rho1 0.75
+    c8_tau1_s4       fails  score +0.06  median +0.07  ceiling 0.96  shared k 8  rho1 0.76
+    K = 2: 0 subsets have a holder; the top score holds in 0 of them, a random pick in 0.0
+    K = 3: 0 subsets have a holder; the top score holds in 0 of them, a random pick in 0.0
+    K = 4: 0 subsets have a holder; the top score holds in 0 of them, a random pick in 0.0
+
+  c8_proj64: pairs right 6/6 (median variant 6/6)
+    c8_proj64_s5     holds  score +0.87  median +0.91  ceiling 0.79  shared k 8  rho1 0.34
+    c8_proj64_s3     holds  score +0.87  median +0.90  ceiling 0.80  shared k 8  rho1 0.31
+    c8_proj64_s42    fails  score +0.69  median +0.71  ceiling 0.77  shared k 8  rho1 0.52
+    c8_proj64_s2     fails  score +0.64  median +0.79  ceiling 0.81  shared k 8  rho1 0.58
+    c8_proj64_s4     fails  score +0.59  median +0.64  ceiling 0.80  shared k 8  rho1 0.61
+    K = 2: 7 subsets have a holder; the top score holds in 7 of them, a random pick in 4.0
+    K = 3: 9 subsets have a holder; the top score holds in 9 of them, a random pick in 4.0
+    K = 4: 5 subsets have a holder; the top score holds in 5 of them, a random pick in 2.0
+
+  c8_aproj64: pairs right 4/4 (median variant 4/4)
+    c8_aproj64_s2    holds  score +0.90  median +0.93  ceiling 0.80  shared k 8  rho1 0.48
+    c8_aproj64_s5    fails  score +0.68  median +0.81  ceiling 0.80  shared k 8  rho1 0.63
+    c8_aproj64_s4    fails  score +0.54  median +0.80  ceiling 0.83  shared k 8  rho1 0.75
+    c8_aproj64_s42   fails  score +0.35  median +0.52  ceiling 0.78  shared k 8  rho1 0.70
+    c8_aproj64_s3    fails  score +0.25  median +0.50  ceiling 0.84  shared k 8  rho1 0.69
+    K = 2: 4 subsets have a holder; the top score holds in 4 of them, a random pick in 2.0
+    K = 3: 6 subsets have a holder; the top score holds in 6 of them, a random pick in 2.0
+    K = 4: 4 subsets have a holder; the top score holds in 4 of them, a random pick in 1.0
+
+  c9_e500: pairs right 3/3 (median variant 3/3)
+    c9_e500_s5       holds  score +0.93  median +0.94  ceiling 0.81  shared k 9  rho1 0.38
+    c9_e500_s3       holds  score +0.93  median +0.93  ceiling 0.82  shared k 9  rho1 0.52
+    c9_e500_s4       holds  score +0.91  median +0.94  ceiling 0.81  shared k 9  rho1 0.24
+    c9_e500_s42      fails  score +0.46  median +0.55  ceiling 0.80  shared k 9  rho1 0.64
+    K = 2: 6 subsets have a holder; the top score holds in 6 of them, a random pick in 4.5
+    K = 3: 4 subsets have a holder; the top score holds in 4 of them, a random pick in 3.0
+
+  c9_e100: pairs right 3/3 (median variant 3/3)
+    c9_e100_s42      holds  score +0.94  median +0.94  ceiling 0.80  shared k 9  rho1 0.31
+    c9_e100_s4       fails  score +0.86  median +0.89  ceiling 0.77  shared k 9  rho1 0.20
+    c9_e100_s5       fails  score +0.85  median +0.88  ceiling 0.79  shared k 9  rho1 0.31
+    c9_e100_s3       fails  score +0.66  median +0.66  ceiling 0.76  shared k 9  rho1 0.55
+    K = 2: 3 subsets have a holder; the top score holds in 3 of them, a random pick in 1.5
+    K = 3: 3 subsets have a holder; the top score holds in 3 of them, a random pick in 1.0
+
+  c10_e500: pairs right 4/4 (median variant 4/4)
+    c10_e500_s42     holds  score +0.92  median +0.94  ceiling 0.78  shared k 10  rho1 0.43
+    c10_e500_s5      holds  score +0.91  median +0.94  ceiling 0.81  shared k 10  rho1 0.36
+    c10_e500_s2      holds  score +0.90  median +0.92  ceiling 0.80  shared k 10  rho1 0.56
+    c10_e500_s3      holds  score +0.89  median +0.92  ceiling 0.77  shared k 10  rho1 0.35
+    c10_e500_s4      fails  score +0.51  median +0.54  ceiling 0.76  shared k 10  rho1 0.46
+    K = 2: 10 subsets have a holder; the top score holds in 10 of them, a random pick in 8.0
+    K = 3: 10 subsets have a holder; the top score holds in 10 of them, a random pick in 8.0
+    K = 4: 5 subsets have a holder; the top score holds in 5 of them, a random pick in 4.0
+
+  c8_ae500: pairs right 25/25 (median variant 25/25)
+    c8_ae500_s6      holds  score +0.90  median +0.94  ceiling 0.82  shared k 8  rho1 0.34
+    c8_ae500_s13     holds  score +0.90  median +0.93  ceiling 0.81  shared k 8  rho1 0.32
+    c8_ae500_s11     holds  score +0.90  median +0.93  ceiling 0.82  shared k 8  rho1 0.41
+    c8_ae500_s12     holds  score +0.89  median +0.95  ceiling 0.81  shared k 8  rho1 0.44
+    c8_ae500_s10     holds  score +0.86  median +0.90  ceiling 0.77  shared k 8  rho1 0.36
+    c8_ae500_s15     fails  score +0.78  median +0.85  ceiling 0.81  shared k 8  rho1 0.46
+    c8_ae500_s8      fails  score +0.51  median +0.56  ceiling 0.83  shared k 8  rho1 0.67
+    c8_ae500_s14     fails  score +0.50  median +0.61  ceiling 0.80  shared k 8  rho1 0.67
+    c8_ae500_s7      fails  score +0.30  median +0.46  ceiling 0.86  shared k 8  rho1 0.68
+    c8_ae500_s9      fails  score +0.25  median +0.35  ceiling 0.86  shared k 8  rho1 0.58
+    K = 2: 35 subsets have a holder; the top score holds in 35 of them, a random pick in 22.5
+    K = 3: 110 subsets have a holder; the top score holds in 110 of them, a random pick in 60.0
+    K = 4: 205 subsets have a holder; the top score holds in 205 of them, a random pick in 105.0
+
+  c12_a100: pairs right 0/0 (median variant 0/0)
+    c12_s3           holds  score +0.92  median +0.94  ceiling 0.74  shared k 12  rho1 0.25
+    c12_s4           holds  score +0.91  median +0.92  ceiling 0.73  shared k 12  rho1 0.25
+    c12_s42          holds  score +0.90  median +0.92  ceiling 0.74  shared k 12  rho1 0.34
+    K = 2: 3 subsets have a holder; the top score holds in 3 of them, a random pick in 3.0
+
+  c16_a100: pairs right 2/2 (median variant 2/2)
+    c16_s3           holds  score +0.89  median +0.90  ceiling 0.63  shared k 16  rho1 0.37
+    c16_s4           holds  score +0.77  median +0.80  ceiling 0.64  shared k 16  rho1 0.36
+    c16_s42          fails  score +0.71  median +0.73  ceiling 0.68  shared k 16  rho1 0.56
+    K = 2: 3 subsets have a holder; the top score holds in 3 of them, a random pick in 2.0
+
+  stage 77's 20 failing codes scored against the c8_ae500 ten: +0.15 to +0.43; the ten's holders in their own cell +0.86 to +0.90; below every holder: 20 of 20
+
+  A1 (9 and 10 units; rho1 7 of 10): holder above failure in 10 of 10 within-cell pairs: works
+  A2 (8 units; rho1 69 of 69): 68 of 69 (99%): works
+  described: the median variant, 10/10 at 9-10 units and 69/69 at 8

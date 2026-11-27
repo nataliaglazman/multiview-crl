@@ -117,6 +117,19 @@ The pilot control's recipe and objective (global + patch InfoNCE, neighbourhood 
                 not trained. Needs TailCode pooling, InfoNCE and --patch-weight 0, and none of --queue, --supervise,
                 --hard-negatives, --entropy-units, --critic-weights, --half-views, --remainder-units, --tau or
                 --harmonic-weight.
+  --sufficiency-weight W  a term for the "all" half of block identifiability (HANDOFF stage 77): the two views
+                should share nothing once the code is known. Targets are each view's whitened GAP from the momentum
+                copy, as --predict-weight's (momentum .996 and whitening ridge .1 unless --predict-momentum and
+                --predict-ridge say otherwise; the copy is built even without --predict-weight). Per view an explainer
+                (MLP, --sufficiency-hidden H wide, default 128) predicts its own view's targets from that view's code,
+                trained by squared error with the code detached, so it cannot pay the code for style. The residuals
+                (targets minus the explainer's output, its weights frozen for this part) are whitened by running
+                statistics, and the term pushes down their running cross-view correlation matrix: the batch's part
+                carries the gradient, the running matrix sets its direction. The gradient reaches the encoder only
+                through the code. On the contrastive batch. Each eval logs the running matrix's largest squared
+                singular values (squared canonical correlations). Needs TailCode pooling, InfoNCE and --patch-weight
+                0, and none of --queue, --supervise, --hard-negatives, --entropy-units, --critic-weights,
+                --half-views, --remainder-units, --projector, --tau, --harmonic-weight or --predict-batches uniform.
   --seed S     replicate seed, by the recipe's rule: model init S, batch order S + 10000, uniform batches S and
                 augmentation S + 1. The default is the recipe's 42, so --seed 42 repeats the default run.
   --real        a bank with no latents (adni_bank.py: ADNI, --t1key t1). Training is unchanged; each eval reads only
@@ -146,7 +159,7 @@ the backbone GAP, and for --pool tail from the pooled vector before the head. La
          [--remainder-space main|gap]] [--critic-weights main|remainder|both [--critic-lr LR]] [--supervise volume]
         [--predict-weight W [--predict-momentum M] [--predict-ridge R] [--predict-hidden H]
          [--predict-batches same|uniform]] [--harmonic-weight W [--harmonic-hidden H] [--harmonic-lr LR]]
-        [--tau T] [--projector H]
+        [--tau T] [--projector H] [--sufficiency-weight W [--sufficiency-hidden H]]
 """
 
 import argparse
@@ -621,13 +634,19 @@ class Projector(nn.Module):
     batches), so the head can bend what the code holds as the code's own curves do. In training mode the gauge takes
     the batch's mean and second moment first: the first batch sets them, later ones move them by ``momentum``."""
 
-    def __init__(self, units, hidden, momentum=0.01):
+    def __init__(self, units, hidden, momentum=0.01, out=None):
         super().__init__()
         self.momentum = momentum
-        self.linear = nn.Linear(units, units)
-        nn.init.eye_(self.linear.weight)
+        self.out = units if out is None else out
+        self.linear = nn.Linear(units, self.out)
+        if self.out == units:
+            nn.init.eye_(self.linear.weight)
+        else:  # --projector-out: the code itself first, then random linear mixes of it (never constant, so the loss's
+            # per-batch standardization has something to scale), for the MLP to turn into curves
+            with torch.no_grad():
+                self.linear.weight[:units] = torch.eye(units)
         nn.init.zeros_(self.linear.bias)
-        self.mlp = nn.Sequential(nn.Linear(units, hidden), nn.GELU(), nn.Linear(hidden, units))
+        self.mlp = nn.Sequential(nn.Linear(units, hidden), nn.GELU(), nn.Linear(hidden, self.out))
         nn.init.zeros_(self.mlp[-1].weight)
         nn.init.zeros_(self.mlp[-1].bias)
         self.register_buffer("mean", torch.zeros(2, units))
@@ -663,6 +682,87 @@ def projector_linearity(projector, codes, device):
         out = projector(pair).cpu().numpy()
     projector.train(flag)
     return [round(float(np.mean([ridge(codes[v], out[v][:, j]) for j in range(out.shape[-1])])), 4) for v in range(2)]
+
+
+class RunningMoments:
+    """Running mean and covariance of (B, d) batches (momentum per update), kept on the CPU in double precision, and
+    whitening by them: (x - mean) times the inverse square root of the covariance plus ridge times its mean variance.
+    Whitening is differentiable in x; the statistics are constants. With ``dim`` the moments start at mean 0 and
+    covariance I (what whitened targets have), so early whitening is not set by one rank-deficient batch; otherwise
+    the first batch sets them."""
+
+    def __init__(self, momentum=0.01, ridge=0.1, dim=None):
+        self.momentum, self.ridge, self.mean, self.cov, self.matrix = momentum, ridge, None, None, None
+        if dim is not None:
+            self.mean, self.cov = torch.zeros(dim, dtype=torch.float64), torch.eye(dim, dtype=torch.float64)
+            self.refresh()
+
+    def refresh(self):
+        c = self.cov + self.ridge * self.cov.diagonal().mean() * torch.eye(len(self.cov), dtype=self.cov.dtype)
+        values, vectors = torch.linalg.eigh(c)
+        self.matrix = (vectors * values.clamp_min(1e-12).rsqrt()) @ vectors.T
+
+    @torch.no_grad()
+    def update(self, batch):
+        x = batch.detach().double().cpu()
+        mean, cov = x.mean(0), torch.cov(x.T, correction=0)
+        if self.mean is None:
+            self.mean, self.cov = mean, cov
+        else:
+            self.mean += self.momentum * (mean - self.mean)
+            self.cov += self.momentum * (cov - self.cov)
+        self.refresh()
+
+    def __call__(self, batch):
+        mean = self.mean.to(device=batch.device, dtype=batch.dtype)
+        return (batch - mean) @ self.matrix.to(device=batch.device, dtype=batch.dtype)
+
+
+class Sufficiency(nn.Module):
+    """--sufficiency-weight: what the two views' targets still share once each view's code has explained its own.
+
+    explainers[v] maps view v's code to view v's whitened targets. ``fit`` trains them by squared error with the code
+    detached. ``forward`` returns the term: the residuals (explainer weights frozen, so its gradient reaches the code
+    only) are whitened by running moments and each channel standardized over the batch, their batch cross-view
+    correlation matrix C is formed, and the term is
+    sum(S * C) with S the running (detached) matrix, whose gradient is that of |S|^2 / 2 through this batch's share.
+    The moments start at mean 0 and covariance I and S at zero, so the term grows as structure accumulates.
+    ``value`` gives S's largest squared singular values: squared canonical correlations of the residuals."""
+
+    def __init__(self, units, channels, hidden=128, momentum=0.01, ridge=0.1):
+        super().__init__()
+        self.explainers = nn.ModuleList(
+            nn.Sequential(
+                nn.Linear(units, hidden), nn.SiLU(), nn.Linear(hidden, hidden), nn.SiLU(), nn.Linear(hidden, channels)
+            )
+            for _ in range(2)
+        )
+        self.moments = [RunningMoments(momentum, ridge, channels), RunningMoments(momentum, ridge, channels)]
+        self.momentum, self.running = momentum, None
+
+    def fit(self, pair, targets):
+        return sum(F.mse_loss(e(z.detach()), t.detach()) for e, z, t in zip(self.explainers, pair, targets)) / 2
+
+    def forward(self, pair, targets):
+        whitened = []
+        for e, m, z, t in zip(self.explainers, self.moments, pair, targets):
+            frozen = {k: p.detach() for k, p in e.named_parameters()}
+            residual = t.detach() - torch.func.functional_call(e, frozen, (z,))
+            m.update(residual)
+            w = m(residual)
+            # each whitened channel standardized over the batch, inside the graph: C is then a correlation matrix, so
+            # making the residuals larger cannot lower the term (running whitening alone lags and can be outrun)
+            whitened.append((w - w.mean(0)) / (w.std(0) + 1e-6))
+        batch = whitened[0].T @ whitened[1] / len(whitened[0])
+        if self.running is None:
+            self.running = torch.zeros_like(batch.detach())
+        self.running += self.momentum * (batch.detach() - self.running)
+        return (self.running * batch).sum()
+
+    def value(self, k=4):
+        if self.running is None:
+            return []
+        return [round(float(v), 4) for v in torch.linalg.svdvals(self.running.float().cpu()).square()[:k]]
 
 
 def hard_negative_infonce(code, units, tau, concentration, sim, weight=None):
@@ -1186,6 +1286,21 @@ def main():
         help="Hidden width of a head shared by both views between the content units and the global InfoNCE (off)",
     )
     p.add_argument(
+        "--projector-out",
+        type=int,
+        default=None,
+        help="Output width of --projector's head (default: the code's); wider, the InfoNCE reads every output unit, so"
+        " the head can hold the curves the loss wants and the code need not (stage 83)",
+    )
+    p.add_argument(
+        "--sufficiency-weight",
+        type=float,
+        default=0.0,
+        help="Weight of a term pushing down what the two views' teacher GAP still share once each view's code has "
+        "explained its own (0: off)",
+    )
+    p.add_argument("--sufficiency-hidden", type=int, default=128, help="Hidden width of the sufficiency explainers")
+    p.add_argument(
         "--entropy-units",
         type=int,
         default=None,
@@ -1315,17 +1430,43 @@ def main():
                 "--critic-weights needs TailCode pooling and InfoNCE, none of --queue, --hard-negatives, --half-views or"
                 " --supervise, and a positive --critic-lr; remainder and both need --remainder-units"
             )
+    if not (np.isfinite(a.sufficiency_weight) and a.sufficiency_weight >= 0) or a.sufficiency_hidden < 1:
+        raise ValueError("--sufficiency-weight must be finite and non-negative, and --sufficiency-hidden positive")
+    if a.sufficiency_weight and (
+        a.pool == "gap"
+        or a.contrastive_loss_type != "infonce"
+        or a.patch_weight != 0
+        or a.queue
+        or a.supervise
+        or a.hard_negatives
+        or a.entropy_units is not None
+        or a.critic_weights is not None
+        or a.half_views is not None
+        or a.remainder_units is not None
+        or a.projector is not None
+        or a.tau is not None
+        or a.harmonic_weight
+        or a.predict_batches != "same"
+    ):
+        raise ValueError(
+            "--sufficiency-weight needs TailCode pooling, InfoNCE and --patch-weight 0, without --queue, --supervise,"
+            " --hard-negatives, --entropy-units, --critic-weights, --half-views, --remainder-units, --projector, --tau,"
+            " --harmonic-weight or --predict-batches uniform"
+        )
     if not (np.isfinite(a.predict_weight) and a.predict_weight >= 0):
         raise ValueError("--predict-weight must be finite and non-negative")
     if not a.predict_weight and (
-        a.predict_momentum is not None or a.predict_ridge is not None or a.predict_hidden or a.predict_target != "gap"
+        a.predict_hidden
+        or a.predict_target != "gap"
+        or ((a.predict_momentum is not None or a.predict_ridge is not None) and not a.sufficiency_weight)
     ):
         raise ValueError(
             "--predict-momentum, --predict-ridge, --predict-hidden and --predict-target need --predict-weight"
+            " (momentum and ridge also serve --sufficiency-weight's copy)"
         )
     if a.predict_hidden < 0:
         raise ValueError("--predict-hidden is a hidden width, 0 for the linear map alone")
-    if a.predict_weight:
+    if a.predict_weight or a.sufficiency_weight:
         a.predict_momentum = 0.996 if a.predict_momentum is None else a.predict_momentum
         a.predict_ridge = 0.1 if a.predict_ridge is None else a.predict_ridge
         if (
@@ -1337,8 +1478,8 @@ def main():
             or not (np.isfinite(a.predict_ridge) and a.predict_ridge > 0)
         ):
             raise ValueError(
-                "--predict-weight needs TailCode pooling and InfoNCE, neither --queue nor --supervise, a momentum in"
-                " [0, 1) and a positive ridge"
+                "--predict-weight (and --sufficiency-weight's copy) needs TailCode pooling and InfoNCE, neither --queue"
+                " nor --supervise, a momentum in [0, 1) and a positive ridge"
             )
     if a.predict_batches == "uniform" and (
         not a.predict_weight
@@ -1408,6 +1549,10 @@ def main():
             " --supervise, --hard-negatives, --entropy-units, --critic-weights, --half-views, --remainder-units, --tau"
             " or --harmonic-weight"
         )
+    if a.projector_out is not None and (
+        a.projector is None or a.content_units is None or a.projector_out < a.content_units
+    ):
+        raise ValueError("--projector-out needs --projector and --content-units, and at least the code's width")
     if a.entropy_units is not None and (
         a.pool == "gap"
         or a.patch_weight != 0
@@ -1441,7 +1586,8 @@ def main():
         tau_scale, args.tau = a.tau / args.tau, a.tau
         print("global InfoNCE temperature", args.tau, "scaled by", tau_scale, flush=True)
     if a.projector:
-        print("projector head between the content units and the global InfoNCE, hidden", a.projector, flush=True)
+        print("projector head between the content units and the global InfoNCE, hidden", a.projector,
+              *([] if a.projector_out is None else ["output", a.projector_out]), flush=True)
     print(
         "seed", args.seed, "global loss", args.contrastive_loss_type, "patch weight", args.patch_loss_weight, flush=True
     )
@@ -1536,8 +1682,8 @@ def main():
             round(volume[1], 1),
             flush=True,
         )
-    decoders, target_model, whitening = None, None, None
-    if a.predict_weight:
+    decoders, target_model, whitening, sufficiency = None, None, None, None
+    if a.predict_weight or a.sufficiency_weight:
         target_model = copy.deepcopy(model).eval().requires_grad_(False)
         first = np.arange(min(256, len(train)))
         sample = [
@@ -1547,6 +1693,23 @@ def main():
             for s in range(0, len(first), args.batch_size)
         ]
         whitening = TargetWhitening(torch.cat(sample, 1), a.predict_ridge)
+    if a.sufficiency_weight:
+        with torch.random.fork_rng(devices=[]):  # the explainers' init leaves every later draw as without them
+            sufficiency = Sufficiency(units, sample[0].shape[-1], a.sufficiency_hidden).to(a.device)
+        print(
+            "sufficiency weight",
+            a.sufficiency_weight,
+            "explainers",
+            f"{units} -> {a.sufficiency_hidden} -> {a.sufficiency_hidden} -> {sample[0].shape[-1]}",
+            "on the contrastive batch's whitened teacher",
+            a.predict_target,
+            "momentum",
+            a.predict_momentum,
+            "whitening ridge",
+            a.predict_ridge,
+            flush=True,
+        )
+    if a.predict_weight:
         with torch.random.fork_rng(devices=[]):  # the maps' init leaves every later draw as in a run without them
             decoders = prediction_decoders(units, sample[0].shape[-1], a.predict_hidden).to(a.device)
         print(
@@ -1584,8 +1747,9 @@ def main():
     projector = None
     if a.projector:
         with torch.random.fork_rng(devices=[]):  # the head's init leaves every later draw as in a run without it
-            projector = Projector(units, a.projector).to(a.device)
-        print(f"projector head {units} -> {a.projector} -> {units}, shared by both views, identity at the start", flush=True)
+            projector = Projector(units, a.projector, out=a.projector_out).to(a.device)
+        print(f"projector head {units} -> {a.projector} -> {projector.out}, shared by both views, the code itself at the"
+              f" start" + ("" if projector.out == units else " in its first units"), flush=True)
     halves = None if a.half_views is None else half_masks(a.bank, a.half_views, train.t1.shape[-1], a.device)
     test = Bank(a.bank, "val" if a.real else "test", a.t1key, a.test_subjects, a.residual, a.real)
     seen = Bank(a.bank, "train", a.t1key, len(test), a.residual, a.real) if a.real else None
@@ -1656,6 +1820,8 @@ def main():
         parameters += list(decoders.parameters())
     if projector is not None:
         parameters += list(projector.parameters())
+    if sufficiency is not None:
+        parameters += list(sufficiency.parameters())
     if len(critic):
         groups = [{"params": parameters}, {"params": list(critic.parameters()), "lr": a.critic_lr, "weight_decay": 0.0}]
         optimizer = torch.optim.AdamW(groups, lr=args.lr)
@@ -1700,6 +1866,8 @@ def main():
             row["projector_linear_r2"] = projector_linearity(
                 projector, features(model, test, a.device, pool=pool)["code"], a.device
             )
+        if sufficiency is not None:
+            row["sufficiency_sq_canonical"] = sufficiency.value()
         report["history"].append(row)
         (a.out / "report.json").write_text(json.dumps(report, indent=1))
         if a.real:
@@ -1734,6 +1902,12 @@ def main():
         if projector is not None:
             linear = row["projector_linear_r2"]
             print(f"step {step:5d} head output from the code, linear R2 T1 {linear[0]:.3f} FLAIR {linear[1]:.3f}", flush=True)
+        if sufficiency is not None:
+            print(
+                f"step {step:5d} views' residual given the code, running squared canonical correlations "
+                + " ".join(f"{v:.3f}" for v in row["sufficiency_sq_canonical"]),
+                flush=True,
+            )
         if len(critic):
             print(
                 f"step {step:5d} critic weights "
@@ -1801,6 +1975,11 @@ def main():
                 terms = {"bridge": bridge_infonce(code, units, a.entropy_units, args.tau, sim)}
                 with torch.no_grad():  # the recipe's loss on this code, for comparison with every other arm
                     terms["global"] = T.contrastive_loss(code, model, args, sim, crit, None)
+            elif projector is not None and projector.out > units:  # the recipe's InfoNCE on every output unit
+                terms = {"projected": hard_negative_infonce(torch.cat(list(projector(pair))), projector.out, args.tau,
+                                                            0.0, sim)}
+                with torch.no_grad():
+                    terms["global"] = T.contrastive_loss(code, model, args, sim, crit, None)
             elif projector is not None:
                 terms = {"projected": T.contrastive_loss(torch.cat(list(projector(pair))), model, args, sim, crit, None)}
                 with torch.no_grad():  # the recipe's loss on the code itself, for comparison with every other arm
@@ -1848,11 +2027,17 @@ def main():
         if a.decorrelate:
             terms["decor"] = cross_view_decorrelation(*pair)
             loss = loss + a.decorrelate * terms["decor"]
-        if a.predict_batches == "same" and decoders is not None:
+        if a.predict_batches == "same" and (decoders is not None or sufficiency is not None):
             gap = prediction_target(target_model, clean, a.predict_target, pool.keep)
             whitening.update(gap)
-            terms["predict"] = cross_view_prediction(pair, whitening(gap), decoders)
-            loss = loss + a.predict_weight * terms["predict"]
+            targets = whitening(gap)
+            if decoders is not None:
+                terms["predict"] = cross_view_prediction(pair, targets, decoders)
+                loss = loss + a.predict_weight * terms["predict"]
+            if sufficiency is not None:
+                terms["sufficiency"] = sufficiency(pair, targets)
+                terms["explain"] = sufficiency.fit(pair, targets)
+                loss = loss + a.sufficiency_weight * terms["sufficiency"] + terms["explain"]
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         if a.predict_batches == "uniform" or harmonic is not None:
@@ -1913,7 +2098,13 @@ def main():
             if harmonic is not None:
                 state["harmonic"] = harmonic.state_dict()
             if projector is not None:
-                state["projector"] = {"head": projector.state_dict(), "hidden": a.projector}
+                state["projector"] = {"head": projector.state_dict(), "hidden": a.projector, "out": projector.out}
+            if sufficiency is not None:
+                state["sufficiency"] = {
+                    "explainers": sufficiency.explainers.state_dict(),
+                    "hidden": a.sufficiency_hidden,
+                    "running": None if sufficiency.running is None else sufficiency.running.cpu(),
+                }
             torch.save(state, a.out / "model.pt")
             if a.keep_checkpoints:
                 torch.save(state, a.out / f"model_{step:05d}.pt")

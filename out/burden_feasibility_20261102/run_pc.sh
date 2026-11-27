@@ -367,6 +367,25 @@
 # from-scratch codes of the same seeds (they hold at 2, 3, 5 and fail at 4, 42). Precision, code and style audits, both
 # discoveries, the tabular benchmarks, own_directions.py and holds.py, beside the five seeds' 8-unit and 10-unit codes,
 # whose reports come from stage 70 (causal/stage71/). Reading rules: HANDOFF section 9.
+# Stage 71a (opt-in, no training) Stage 71's A100 replicate: the same five seeds and flags, trained as separate Run:ai
+# jobs on A100s (runai_warm.sh), whose runs and logs are copied back into runs/ and logs/ first (names end in _a100,
+# labels c8_aproj64). The same reports on them, beside the PC's five and the from-scratch 8- and 10-unit codes, whose
+# reports come from stage 71 (causal/stage71a/). Reading rules: HANDOFF section 9, stage 71's A100 replicate.
+# Stage 75 (opt-in, no training) Can the runs' codes be merged into one 8-unit code that holds, and does the backbone's
+# leftover past the code carry what a failing code lost? pool_check.py exports the code and GAP of the 45 finished
+# 8-unit codes on the fixed bank (nine cells of five seeds with hold verdicts) for training and test subjects
+# (causal/pool/), then merges each cell's codes through a cross-view bottleneck and reads each code's leftover by CCA
+# between the views, with a repair that swaps the code's most predictable direction for it (causal/stage75/).
+# Reading rules: HANDOFF section 9, stage 75.
+# Stage 76 (opt-in, no training here) Does the leftover detector (stage 75's rho1) hold on codes it never saw? 76: the
+# fixed bank's 9- and 10-unit codes with verdicts (under the rule), and single codes on other banks (described).
+# 76b: the frozen 8-unit recipe at new seeds 6-15, trained as separate Run:ai jobs (runai_warm.sh, names ..._a100_sN)
+# and copied back first; bundles, then the detector and keep-the-lowest-rho1 among subsets of 3 (causal/stage76/).
+# Stages 73 and 74 are the other session's. Reading rules: HANDOFF section 9, stage 76.
+# Stage 77b (opt-in, no training here) The sufficiency term (warm.py --sufficiency-weight 1): the frozen recipe plus
+# the term, and a lean arm (uniform batches, no prediction term), at seeds 16-25, trained as separate Run:ai jobs
+# (runai_warm.sh with WARM=stage77/warm.py, names ..._suff1_c8_20k_a100_sN) and copied back first; bundles, holds and
+# rho1 (pool_check.py detect), and the style audit (causal/stage77/). Reading rules: HANDOFF section 9, stage 77.
 
 # Stage 73 (opt-in, after 68) Why stage 68's evaluated code dipped at 6,000-16,000 steps while its training loss kept
 # falling. The evaluated code differs from the loss's in its gauge statistics (running, not the batch's own) and its
@@ -3151,6 +3170,142 @@ if wants 74; then
         else "${RULES[@]}" > "$OUT/width_rules.log" 2>&1 || echo "Stage 74's width_rules failed, see $OUT/width_rules.log"; fi
     fi
     [ "$DRY" = 0 ] && echo "Stage 74 reports in $OUT: width_sweep$TAG.txt and .png first, then style_audit.txt"
+fi
+
+if wants 71a; then
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos
+    OUT=$D/causal/stage71a
+    sfx() { [ "$1" = 42 ] && echo "" || echo "_s$1"; }  # seed 42's runs carry no suffix
+    SEEDS=(42 2 3 4 5)
+    NEWA=() NEW=() REF=() NEWAN=() OLDN=()
+    for seed in "${SEEDS[@]}"; do
+        x=$(sfx "$seed")
+        NEWA+=(c8_aproj64_s$seed=${P}_abl_codebatch_predict1_proj64_c8_20k_a100$x)
+        NEW+=(c8_proj64_s$seed=${P}_abl_codebatch_predict1_proj64_c8_20k$x)
+        REF+=(c8_e500_s$seed=${P}_abl_codebatch_predict1_c8_20k$x c10_e500_s$seed=${P}_abl_codebatch_predict1_c10_20k$x)
+    done
+    for pair in "${NEWA[@]}"; do NEWAN+=("${pair#*=}"); done
+    for pair in "${NEW[@]}" "${REF[@]}"; do OLDN+=("${pair#*=}"); done
+    needs_done 71a "${NEWAN[@]}" "${OLDN[@]}"
+    if [ "$DRY" = 0 ]; then
+        mkdir -p "$OUT" || exit 1
+        reuse_reports "$D/causal/stage71" "$OUT" "${OLDN[@]}"
+    fi
+    RUNS=()
+    for name in "${NEWAN[@]}" "${OLDN[@]}"; do RUNS+=("$D/runs/$name"); done
+    # one report at a time: side by side they thrash the CPUs (stage 60)
+    stage_report "$OUT" precision_audit "${RUNS[@]}"
+    stage_report "$OUT" code_audit "${RUNS[@]}"
+    stage_report "$OUT" style_audit "${RUNS[@]}"
+    causal_tables "$OUT" "${NEWA[@]}" "${NEW[@]}" "${REF[@]}"
+    CMD=("$PY" "$D/own_directions.py" "$OUT/own_directions.json")
+    for pair in "${NEWA[@]}" "${NEW[@]}" "${REF[@]}"; do CMD+=("${pair%%=*}=$D/causal/${pair#*=}.npz"); done
+    HOLDS=("$PY" "$D/holds.py" "$OUT" "${NEWA[@]}" "${NEW[@]}" "${REF[@]}"
+        --compare c8_proj64:c8_e500 c8_aproj64:c8_e500 c8_aproj64:c8_proj64)
+    if [ "$DRY" = 1 ]; then
+        echo "${CMD[*]} > $OUT/own_directions.txt"
+        echo "${HOLDS[*]} > $OUT/holds.txt"
+    else
+        echo "$(date +%H:%M) own_directions into $OUT"
+        "${CMD[@]}" > "$OUT/own_directions.txt" 2>&1 \
+            || { echo "Stage 71a's own_directions failed, see $OUT/own_directions.txt"; exit 1; }
+        "${HOLDS[@]}" > "$OUT/holds.txt" 2>&1 || { echo "Stage 71a's holds.py failed, see $OUT/holds.txt"; exit 1; }
+        echo "Stage 71a reports in $OUT: holds.txt first, then own_directions.txt"
+    fi
+fi
+
+if wants 75; then
+    OUT=$D/causal/stage75
+    if [ "$DRY" = 1 ]; then
+        echo "$PY $D/pool_check.py export --all > $OUT/export.log"
+        echo "$PY $D/pool_check.py run $OUT/pool_check.json > $OUT/pool_check.txt"
+    else
+        mkdir -p "$OUT" || exit 1
+        echo "$(date +%H:%M) export the codes and GAP into $D/causal/pool"
+        "$PY" "$D/pool_check.py" export --all > "$OUT/export.log" 2>&1 \
+            || { echo "Stage 75's export failed, see $OUT/export.log"; exit 1; }
+        echo "$(date +%H:%M) pool_check into $OUT"
+        "$PY" "$D/pool_check.py" run "$OUT/pool_check.json" > "$OUT/pool_check.txt" 2>&1 \
+            || { echo "Stage 75 failed, see $OUT/pool_check.txt"; exit 1; }
+        echo "Stage 75 report in $OUT/pool_check.txt"
+    fi
+fi
+
+if wants 76 || wants 76b; then
+    OUT=$D/causal/stage76
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos
+    sfx() { [ "$1" = 42 ] && echo "" || echo "_s$1"; }  # seed 42's runs carry no suffix
+    detect() { # detect NAME [pool_check.py detect options]: into $OUT/NAME.{json,txt}
+        local name=$1; shift
+        if [ "$DRY" = 1 ]; then echo "$PY $D/pool_check.py detect $OUT/$name.json $* > $OUT/$name.txt"; return; fi
+        echo "$(date +%H:%M) pool_check detect into $OUT/$name.txt"
+        "$PY" "$D/pool_check.py" detect "$OUT/$name.json" "$@" > "$OUT/$name.txt" 2>&1 \
+            || { echo "Stage 76's $name failed, see $OUT/$name.txt"; exit 1; }
+    }
+    [ "$DRY" = 1 ] || mkdir -p "$OUT" || exit 1
+fi
+
+if wants 76; then
+    A=()  # part A: the fixed bank's 9- and 10-unit codes with verdicts (stage 64-65), under the rule
+    for seed in 42 3 4 5; do
+        A+=(c9_e500_s$seed=${P}_abl_codebatch_predict1_c9_20k$(sfx $seed))
+        A+=(c9_e100_s$seed=${P}_abl_codebatch100_predict1_c9_20k$(sfx $seed))
+    done
+    for seed in 42 2 3 4 5; do A+=(c10_e500_s$seed=${P}_abl_codebatch_predict1_c10_20k$(sfx $seed)); done
+    detect existing "${A[@]}" --stages stage64 stage65 --subsets 2 3
+    OTHER=(  # described only: single seeds on other recipes and banks
+        c8_uni_s42=${P}_predict1_c8_20k c10_uni_s42=${P}_predict1_c10_20k c10_uni_s2=${P}_predict1_c10_20k_s2
+        c10_drawn_s42=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c10_20k
+        c10_drawn_s2=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c10_20k_s2
+        c11_drawn_s42=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c11_20k
+        c8_indep_s42=ssl_uni_jitter_nopatch_restail_t104_nofield_fixedpos_abl_codebatch_predict1_c8_20k
+    )
+    detect other_banks "${OTHER[@]}"
+fi
+
+if wants 76b; then
+    B=()  # part B: the frozen recipe at new seeds on A100s (runai_warm.sh), copied back into runs/ and logs/
+    for seed in 6 7 8 9 10 11 12 13 14 15; do
+        name=${P}_abl_codebatch_predict1_c8_20k_a100_s$seed
+        B+=(c8_ae500_s$seed=$name)
+        if [ "$DRY" = 1 ]; then
+            echo "$PY $D/causal_bundle.py $D/runs/$name $D/causal/$name.npz"
+        elif [ ! "$D/causal/$name.npz" -nt "$D/runs/$name/model.pt" ]; then
+            grep -qx DONE "$D/logs/$name.log" || { echo "Stage 76b needs $name finished and copied back."; exit 1; }
+            "$PY" "$D/causal_bundle.py" "$D/runs/$name" "$D/causal/$name.npz" > "$D/causal/$name.log" 2>&1 \
+                || { echo "bundle failed, see $D/causal/$name.log"; exit 1; }
+        fi
+    done
+    detect new_seeds "${B[@]}" --subsets 2 3 4 5 --rule-k 3
+fi
+
+if wants 77b; then
+    OUT=$D/causal/stage77
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos
+    [ "$DRY" = 1 ] || mkdir -p "$OUT" || exit 1
+    PAIRS=() RUNS=()  # the two sufficiency arms at seeds 16-25, trained on Run:ai and copied back first
+    for seed in 16 17 18 19 20 21 22 23 24 25; do
+        for arm in asuff:abl_codebatch_predict1_suff1 alean:uni_suff1; do
+            name=${P}_${arm#*:}_c8_20k_a100_s$seed
+            PAIRS+=(c8_${arm%%:*}_s$seed=$name)
+            RUNS+=("$D/runs/$name")
+            if [ "$DRY" = 1 ]; then
+                echo "$PY $D/causal_bundle.py $D/runs/$name $D/causal/$name.npz"
+            elif [ ! "$D/causal/$name.npz" -nt "$D/runs/$name/model.pt" ]; then
+                grep -qx DONE "$D/logs/$name.log" || { echo "Stage 77b needs $name finished and copied back."; exit 1; }
+                "$PY" "$D/causal_bundle.py" "$D/runs/$name" "$D/causal/$name.npz" > "$D/causal/$name.log" 2>&1 \
+                    || { echo "bundle failed, see $D/causal/$name.log"; exit 1; }
+            fi
+        done
+    done
+    if [ "$DRY" = 1 ]; then
+        echo "$PY $D/pool_check.py detect $OUT/runs.json ${PAIRS[*]} --subsets 3 > $OUT/runs.txt"
+    else
+        echo "$(date +%H:%M) pool_check detect into $OUT/runs.txt"
+        "$PY" "$D/pool_check.py" detect "$OUT/runs.json" "${PAIRS[@]}" --subsets 3 > "$OUT/runs.txt" 2>&1 \
+            || { echo "Stage 77b's detect failed, see $OUT/runs.txt"; exit 1; }
+    fi
+    stage_report "$OUT" style_audit "${RUNS[@]}"
 fi
 
 if wants 79; then

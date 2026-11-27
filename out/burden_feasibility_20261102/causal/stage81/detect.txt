@@ -1,0 +1,49 @@
+  long_at20000_s42 fails  last 0.01/0.01  worst 0.05/0.06  rho1 0.59 rho2 0.46
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus40k_a100_at25000.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 5000
+  long_at25000_s42 fails  last 0.11/0.09  worst 0.13/0.12  rho1 0.59 rho2 0.48
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus40k_a100_at30000.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 10000
+  long_at30000_s42 fails  last 0.18/0.16  worst 0.21/0.19  rho1 0.67 rho2 0.50
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus40k_a100_at35000.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 15000
+  long_at35000_s42 fails  last 0.22/0.21  worst 0.24/0.23  rho1 0.62 rho2 0.37
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus40k_a100_at40000.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  long_at40000_s42 fails  last 0.30/0.27  worst 0.32/0.29  rho1 0.54 rho2 0.40
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus40k_a100_at45000.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 25000
+  long_at45000_s42 fails  last 0.32/0.31  worst 0.34/0.33  rho1 0.53 rho2 0.38
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus40k_a100_at50000.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 30000
+  long_at50000_s42 fails  last 0.35/0.34  worst 0.39/0.37  rho1 0.50 rho2 0.40
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus40k_a100_at55000.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 35000
+  long_at55000_s42 fails  last 0.41/0.40  worst 0.43/0.42  rho1 0.42 rho2 0.31
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus40k_a100_at60000.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 40000
+  long_at60000_s42 holds  last 0.44/0.43  worst 0.46/0.45  rho1 0.32 rho2 0.41
+  long_at20000_s4  fails  last 0.01/-0.01  worst 0.22/0.19  rho1 0.62 rho2 0.39
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus40k_a100_s4_at25000.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 5000
+  long_at25000_s4  fails  last 0.01/0.01  worst 0.25/0.25  rho1 0.60 rho2 0.30
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus40k_a100_s4_at30000.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 10000
+  long_at30000_s4  fails  last 0.00/0.02  worst 0.26/0.27  rho1 0.65 rho2 0.36
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus40k_a100_s4_at35000.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 15000
+  long_at35000_s4  fails  last -0.00/0.01  worst 0.27/0.27  rho1 0.61 rho2 0.33
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus40k_a100_s4_at40000.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  long_at40000_s4  fails  last 0.01/0.03  worst 0.29/0.30  rho1 0.57 rho2 0.36
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus40k_a100_s4_at45000.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 25000
+  long_at45000_s4  fails  last 0.00/0.01  worst 0.28/0.31  rho1 0.57 rho2 0.41
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus40k_a100_s4_at50000.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 30000
+  long_at50000_s4  fails  last 0.01/0.01  worst 0.33/0.34  rho1 0.57 rho2 0.46
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus40k_a100_s4_at55000.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 35000
+  long_at55000_s4  fails  last 0.01/0.02  worst 0.33/0.33  rho1 0.60 rho2 0.46
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus40k_a100_s4_at60000.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 40000
+  long_at60000_s4  fails  last 0.01/0.01  worst 0.35/0.34  rho1 0.58 rho2 0.42
+
+  long_at20000 rho1 by rank (h holds, f fails): 0.59f < 0.62f; pairs right 0/0
+  long_at25000 rho1 by rank (h holds, f fails): 0.59f < 0.60f; pairs right 0/0
+  long_at30000 rho1 by rank (h holds, f fails): 0.65f < 0.67f; pairs right 0/0
+  long_at35000 rho1 by rank (h holds, f fails): 0.61f < 0.62f; pairs right 0/0
+  long_at40000 rho1 by rank (h holds, f fails): 0.54f < 0.57f; pairs right 0/0
+  long_at45000 rho1 by rank (h holds, f fails): 0.53f < 0.57f; pairs right 0/0
+  long_at50000 rho1 by rank (h holds, f fails): 0.50f < 0.57f; pairs right 0/0
+  long_at55000 rho1 by rank (h holds, f fails): 0.42f < 0.60f; pairs right 0/0
+  long_at60000 rho1 by rank (h holds, f fails): 0.32h < 0.58f; pairs right 1/1
+
+  DETECTOR: AUC 1.00 over 17 failures and 1 holders; within-cell pairs right 1/1 (needed 80%): described only (fewer than 2 holders or 2 failures)
+  stage 75's ranges as a cut: holders at or under .56 1/1, failures at or over .45 16/17; a cut at .50 classifies 16/18
+
+Saved out/burden_feasibility_20261102/causal/stage81/detect.json

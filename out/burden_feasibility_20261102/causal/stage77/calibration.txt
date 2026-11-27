@@ -1,0 +1,13 @@
+== Calibration on the baseline alone (HANDOFF stage 77): (a) the 8-unit backbone holds the faint own part
+   (ridge R2 >= .5), (b) 12 units hold in >= 4 of 5 seeds, (c) 8 units fail in >= 3 of 5
+  share 0.50 noise 0.3: available 0.68; 12 units hold 5/5 (burden own 0.62); 8 units fail 0/5 (burden own 0.56)
+  share 0.50 noise 0.6: available 0.42; 12 units hold 0/5 (burden own 0.26); 8 units fail 5/5 (burden own 0.04)
+  share 0.50 noise 1.0: available 0.25; 12 units hold 0/5 (burden own 0.06); 8 units fail 5/5 (burden own 0.02)
+  share 0.70 noise 0.3: available 0.50; 12 units hold 0/5 (burden own 0.34); 8 units fail 5/5 (burden own 0.19)
+  share 0.70 noise 0.6: available 0.27; 12 units hold 0/5 (burden own 0.04); 8 units fail 5/5 (burden own 0.02)
+  share 0.70 noise 1.0: available 0.16; 12 units hold 0/5 (burden own -0.00); 8 units fail 5/5 (burden own -0.00)
+  share 0.85 noise 0.3: available 0.20; 12 units hold 0/5 (burden own 0.00); 8 units fail 5/5 (burden own 0.00)
+  share 0.85 noise 0.6: available 0.15; 12 units hold 0/5 (burden own -0.01); 8 units fail 5/5 (burden own -0.01)
+  share 0.85 noise 1.0: available 0.08; 12 units hold 0/5 (burden own -0.00); 8 units fail 5/5 (burden own -0.00)
+  No setting meets (a)-(c): the toy is uninformative and step 1 stops (HANDOFF stage 77).
+Saved out/burden_feasibility_20261102/causal/stage77/calibration.json

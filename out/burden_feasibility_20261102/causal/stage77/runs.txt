@@ -1,0 +1,50 @@
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s16.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_asuff_s16     fails  last -0.02/-0.01  worst 0.01/0.02  rho1 0.43 rho2 0.36
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s16.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_alean_s16     fails  last -0.01/-0.00  worst 0.07/0.05  rho1 0.32 rho2 0.19
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s17.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_asuff_s17     fails  last 0.00/0.00  worst 0.02/0.01  rho1 0.45 rho2 0.36
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s17.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_alean_s17     fails  last -0.02/-0.01  worst 0.14/0.15  rho1 0.26 rho2 0.18
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s18.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_asuff_s18     fails  last -0.02/-0.02  worst 0.13/0.12  rho1 0.45 rho2 0.36
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s18.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_alean_s18     fails  last -0.01/-0.00  worst 0.14/0.15  rho1 0.38 rho2 0.25
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s19.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_asuff_s19     fails  last -0.01/-0.00  worst 0.12/0.12  rho1 0.48 rho2 0.34
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s19.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_alean_s19     fails  last -0.01/-0.01  worst 0.07/0.08  rho1 0.37 rho2 0.21
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s20.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_asuff_s20     fails  last 0.01/0.02  worst 0.11/0.11  rho1 0.37 rho2 0.38
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s20.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_alean_s20     fails  last -0.01/-0.01  worst 0.05/0.06  rho1 0.25 rho2 0.29
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s21.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_asuff_s21     fails  last 0.01/0.01  worst 0.05/0.04  rho1 0.43 rho2 0.35
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s21.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_alean_s21     fails  last -0.00/-0.02  worst 0.01/0.01  rho1 0.25 rho2 0.25
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s22.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_asuff_s22     fails  last 0.03/0.07  worst 0.11/0.14  rho1 0.36 rho2 0.33
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s22.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_alean_s22     fails  last -0.01/-0.01  worst -0.00/0.01  rho1 0.42 rho2 0.32
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s23.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_asuff_s23     fails  last 0.01/0.02  worst 0.05/0.07  rho1 0.39 rho2 0.26
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s23.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_alean_s23     fails  last -0.02/-0.01  worst 0.02/0.02  rho1 0.25 rho2 0.32
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s24.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_asuff_s24     fails  last -0.02/-0.01  worst 0.03/0.01  rho1 0.55 rho2 0.43
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s24.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_alean_s24     fails  last -0.01/-0.01  worst 0.05/0.04  rho1 0.42 rho2 0.24
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s25.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_asuff_s25     fails  last -0.01/-0.01  worst 0.19/0.21  rho1 0.34 rho2 0.32
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s25.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_alean_s25     fails  last -0.02/-0.01  worst -0.00/0.00  rho1 0.33 rho2 0.28
+
+  c8_alean     rho1 by rank (h holds, f fails): 0.25f < 0.25f < 0.25f < 0.26f < 0.32f < 0.33f < 0.37f < 0.38f < 0.42f < 0.42f; pairs right 0/0
+               K = 3: 0 of 120 subsets have a holder; the lowest rho1 holds in 0 of them, a random pick in 0.0
+  c8_asuff     rho1 by rank (h holds, f fails): 0.34f < 0.36f < 0.37f < 0.39f < 0.43f < 0.43f < 0.45f < 0.45f < 0.48f < 0.55f; pairs right 0/0
+               K = 3: 0 of 120 subsets have a holder; the lowest rho1 holds in 0 of them, a random pick in 0.0
+
+  DETECTOR: AUC nan over 20 failures and 0 holders; within-cell pairs right 0/0 (needed 80%): described only (fewer than 2 holders or 2 failures)
+  stage 75's ranges as a cut: holders at or under .56 0/0, failures at or over .45 2/20; a cut at .50 classifies 1/20
+
+Saved out/burden_feasibility_20261102/causal/stage77/runs.json

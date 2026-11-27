@@ -1,0 +1,23 @@
+  codes read with the recomputed gauge, from /home/ng24/projects/multiview-crl/out/burden_feasibility_20261102/causal/pool_recomputed
+  c8_ae500_s6      holds  last 0.59/0.62  worst 0.60/0.63  rho1 0.25 rho2 0.17
+  c8_ae500_s7      fails  last -0.00/-0.01  worst 0.03/0.03  rho1 0.59 rho2 0.43
+  c8_ae500_s8      fails  last 0.03/0.01  worst 0.38/0.34  rho1 0.63 rho2 0.28
+  c8_ae500_s9      fails  last -0.02/-0.01  worst 0.16/0.17  rho1 0.55 rho2 0.33
+  c8_ae500_s10     holds  last 0.61/0.55  worst 0.63/0.56  rho1 0.28 rho2 0.17
+  c8_ae500_s11     holds  last 0.55/0.54  worst 0.56/0.54  rho1 0.03 rho2 0.28
+  c8_ae500_s12     holds  last 0.54/0.54  worst 0.55/0.55  rho1 0.32 rho2 0.17
+  c8_ae500_s13     holds  last 0.43/0.45  worst 0.46/0.47  rho1 0.15 rho2 0.18
+  c8_ae500_s14     fails  last 0.01/-0.01  worst 0.31/0.31  rho1 0.58 rho2 0.27
+  c8_ae500_s15     fails  last 0.28/0.26  worst 0.38/0.32  rho1 0.24 rho2 0.27
+
+  c8_ae500     rho1 by rank (h holds, f fails): 0.03h < 0.15h < 0.24f < 0.25h < 0.28h < 0.32h < 0.55f < 0.58f < 0.59f < 0.63f; pairs right 22/25
+               K = 2: 35 of 45 subsets have a holder; the lowest rho1 holds in 32 of them, a random pick in 22.5
+               K = 3: 110 of 120 subsets have a holder; the lowest rho1 holds in 95 of them, a random pick in 60.0
+               K = 4: 205 of 210 subsets have a holder; the lowest rho1 holds in 174 of them, a random pick in 105.0
+               K = 5: 251 of 252 subsets have a holder; the lowest rho1 holds in 217 of them, a random pick in 126.0
+
+  DETECTOR: AUC 0.88 over 5 failures and 5 holders; within-cell pairs right 22/25 (needed 80%): works
+  SELECTION (K = 3): the lowest rho1 holds in 95 of 110 subsets with a holder (86%; a random pick 55%): unresolved
+  stage 75's ranges as a cut: holders at or under .56 5/5, failures at or over .45 4/5; a cut at .50 classifies 9/10
+
+Saved out/burden_feasibility_20261102/causal/stage78/a_recomputed.json

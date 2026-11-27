@@ -1,0 +1,41 @@
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c9_20k.npz {'code_train': (2, 2000, 9), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 9), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c9_e500_s42      fails  last 0.04/0.02  worst 0.25/0.23  rho1 0.64 rho2 0.44  stage verdict no
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c9_20k.npz {'code_train': (2, 2000, 9), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 9), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c9_e100_s42      holds  last 0.62/0.62  worst 0.63/0.63  rho1 0.31 rho2 -0.02  stage verdict yes
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c9_20k_s3.npz {'code_train': (2, 2000, 9), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 9), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c9_e500_s3       holds  last 0.58/0.56  worst 0.60/0.60  rho1 0.52 rho2 0.27  stage verdict yes
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c9_20k_s3.npz {'code_train': (2, 2000, 9), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 9), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c9_e100_s3       fails  last 0.16/0.19  worst 0.30/0.31  rho1 0.55 rho2 0.16  stage verdict no
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c9_20k_s4.npz {'code_train': (2, 2000, 9), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 9), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c9_e500_s4       holds  last 0.56/0.55  worst 0.57/0.57  rho1 0.24 rho2 0.34  stage verdict yes
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c9_20k_s4.npz {'code_train': (2, 2000, 9), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 9), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c9_e100_s4       fails  last 0.42/0.40  worst 0.47/0.47  rho1 0.20 rho2 0.23  stage verdict no
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c9_20k_s5.npz {'code_train': (2, 2000, 9), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 9), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c9_e500_s5       holds  last 0.63/0.60  worst 0.64/0.61  rho1 0.38 rho2 0.22  stage verdict yes
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c9_20k_s5.npz {'code_train': (2, 2000, 9), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 9), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c9_e100_s5       fails  last 0.17/0.14  worst 0.58/0.56  rho1 0.31 rho2 0.12  stage verdict no
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k.npz {'code_train': (2, 2000, 10), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 10), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c10_e500_s42     holds  last 0.59/0.56  worst 0.59/0.57  rho1 0.43 rho2 0.17  stage verdict yes
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s2.npz {'code_train': (2, 2000, 10), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 10), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c10_e500_s2      holds  last 0.57/0.58  worst 0.58/0.59  rho1 0.56 rho2 0.14  stage verdict yes
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s3.npz {'code_train': (2, 2000, 10), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 10), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c10_e500_s3      holds  last 0.57/0.59  worst 0.59/0.61  rho1 0.35 rho2 0.37  stage verdict yes
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s4.npz {'code_train': (2, 2000, 10), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 10), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c10_e500_s4      fails  last 0.04/0.07  worst 0.17/0.19  rho1 0.46 rho2 0.24  stage verdict no
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s5.npz {'code_train': (2, 2000, 10), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 10), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c10_e500_s5      holds  last 0.63/0.62  worst 0.64/0.63  rho1 0.36 rho2 0.24  stage verdict yes
+
+  c10_e500     rho1 by rank (h holds, f fails): 0.35h < 0.36h < 0.43h < 0.46f < 0.56h; pairs right 3/4
+               K = 2: 10 of 10 subsets have a holder; the lowest rho1 holds in 9 of them, a random pick in 8.0
+               K = 3: 10 of 10 subsets have a holder; the lowest rho1 holds in 10 of them, a random pick in 8.0
+  c9_e100      rho1 by rank (h holds, f fails): 0.20f < 0.31f < 0.31h < 0.55f; pairs right 1/3
+               K = 2: 3 of 6 subsets have a holder; the lowest rho1 holds in 1 of them, a random pick in 1.5
+               K = 3: 3 of 4 subsets have a holder; the lowest rho1 holds in 0 of them, a random pick in 1.0
+  c9_e500      rho1 by rank (h holds, f fails): 0.24h < 0.38h < 0.52h < 0.64f; pairs right 3/3
+               K = 2: 6 of 6 subsets have a holder; the lowest rho1 holds in 6 of them, a random pick in 4.5
+               K = 3: 4 of 4 subsets have a holder; the lowest rho1 holds in 4 of them, a random pick in 3.0
+
+  DETECTOR: AUC 0.55 over 5 failures and 8 holders; within-cell pairs right 7/10 (needed 80%): fails
+  stage 75's ranges as a cut: holders at or under .56 8/8, failures at or over .45 3/5; a cut at .50 classifies 8/13
+
+Saved out/burden_feasibility_20261102/causal/stage76/existing.json

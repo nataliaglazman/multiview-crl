@@ -1,0 +1,22 @@
+  c8_ae500_s6      holds  last 0.62/0.63  worst 0.64/0.63  rho1 0.34 rho2 0.21
+  c8_ae500_s7      fails  last -0.00/-0.00  worst 0.03/0.03  rho1 0.68 rho2 0.50
+  c8_ae500_s8      fails  last 0.03/0.01  worst 0.37/0.33  rho1 0.67 rho2 0.34
+  c8_ae500_s9      fails  last -0.02/-0.02  worst 0.16/0.17  rho1 0.58 rho2 0.38
+  c8_ae500_s10     holds  last 0.62/0.58  worst 0.62/0.59  rho1 0.36 rho2 0.19
+  c8_ae500_s11     holds  last 0.56/0.54  worst 0.57/0.55  rho1 0.41 rho2 0.18
+  c8_ae500_s12     holds  last 0.52/0.54  worst 0.53/0.55  rho1 0.44 rho2 0.36
+  c8_ae500_s13     holds  last 0.46/0.49  worst 0.49/0.51  rho1 0.32 rho2 0.28
+  c8_ae500_s14     fails  last -0.00/-0.01  worst 0.32/0.32  rho1 0.67 rho2 0.43
+  c8_ae500_s15     fails  last 0.30/0.26  worst 0.39/0.33  rho1 0.46 rho2 0.35
+
+  c8_ae500     rho1 by rank (h holds, f fails): 0.32h < 0.34h < 0.36h < 0.41h < 0.44h < 0.46f < 0.58f < 0.67f < 0.67f < 0.68f; pairs right 25/25
+               K = 2: 35 of 45 subsets have a holder; the lowest rho1 holds in 35 of them, a random pick in 22.5
+               K = 3: 110 of 120 subsets have a holder; the lowest rho1 holds in 110 of them, a random pick in 60.0
+               K = 4: 205 of 210 subsets have a holder; the lowest rho1 holds in 205 of them, a random pick in 105.0
+               K = 5: 251 of 252 subsets have a holder; the lowest rho1 holds in 251 of them, a random pick in 126.0
+
+  DETECTOR: AUC 1.00 over 5 failures and 5 holders; within-cell pairs right 25/25 (needed 80%): works
+  SELECTION (K = 3): the lowest rho1 holds in 110 of 110 subsets with a holder (100%; a random pick 55%): works
+  stage 75's ranges as a cut: holders at or under .56 5/5, failures at or over .45 5/5; a cut at .50 classifies 9/10
+
+Saved out/burden_feasibility_20261102/causal/stage78/a_stored.json

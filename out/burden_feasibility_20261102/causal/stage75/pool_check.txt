@@ -1,0 +1,152 @@
+== A. Merge: per cell, the five runs' codes merged into 8 units (rule: holds in >= 7 of the 8 cells with a
+   holder works, <= 4 fails). Holds as holds.py: last spectrum value and ventricle-burden worst >= .40, both
+   views. Curves: directions under .5 own R2 that boosting from the seven factors reads at .5 or more.
+  e500   holders 3/5 (s2 s3 s5):  holds yes  last 0.42/0.44  worst 0.42/0.45  curves 2/2  restarts holding 3/5
+         against its best holder (c8_e500_s2): ventricle T1 0.71, ventricle FLAIR 0.69
+         against c10_e500_s42: ventricle T1 0.71, burden T1 0.49, ventricle FLAIR 0.69
+  e100   holders 2/5 (s3 s4):  holds no   last 0.33/0.39  worst 0.36/0.41  curves 1/2  restarts holding 4/5
+         against its best holder (c8_e100_s3): within .10
+         against c10_e500_s42: ventricle T1 0.66, ventricle FLAIR 0.60
+  cont   holders 3/5 (s2 s3 s5):  holds no   last 0.30/0.31  worst 0.37/0.39  curves 2/2  restarts holding 4/5
+         against its best holder (c8_cont_s5): ventricle T1 0.67, burden T1 0.48, burden FLAIR 0.49
+         against c10_e500_s42: ventricle T1 0.67, burden T1 0.48, ventricle FLAIR 0.66
+  red    holders 3/5 (s42 s2 s5):  holds yes  last 0.67/0.66  worst 0.67/0.67  curves 1/1  restarts holding 5/5
+         against its best holder (c8_red_s5): within .10
+         against c10_e500_s42: within .10
+  pca    holders 2/5 (s42 s5):  holds yes  last 0.51/0.52  worst 0.63/0.64  curves 1/1  restarts holding 5/5
+         against its best holder (c8_pca_s42): sulcal T1 0.56, sulcal FLAIR 0.60
+         against c10_e500_s42: sulcal T1 0.56, sulcal FLAIR 0.60
+  harm   holders 1/5 (s2):  holds no   last 0.25/0.27  worst 0.29/0.33  curves 2/2  restarts holding 2/5
+         against its best holder (c8_harm_s2): ventricle T1 0.68, ventricle FLAIR 0.65
+         against c10_e500_s42: ventricle T1 0.68, burden T1 0.41, ventricle FLAIR 0.65, burden FLAIR 0.46
+  tau1   holders 0/5 (-):  holds no   last -0.02/-0.02  worst -0.01/-0.01  curves 4/4  restarts holding 0/5
+         against c10_e500_s42: ventricle T1 0.43, burden T1 0.01, thickness T1 0.40, sulcal T1 0.15, ventricle FLAIR 0.39, burden FLAIR 0.01, thickness FLAIR 0.40, sulcal FLAIR 0.14
+  proj64 holders 2/5 (s3 s5):  holds yes  last 0.43/0.44  worst 0.57/0.55  curves 2/2  restarts holding 5/5
+         against its best holder (c8_proj64_s3): sulcal FLAIR 0.65
+         against c10_e500_s42: sulcal T1 0.61, sulcal FLAIR 0.65
+  aproj64 holders 1/5 (s2):  holds no   last 0.37/0.27  worst 0.41/0.33  curves 2/2  restarts holding 2/5
+         against its best holder (c8_aproj64_s2): burden T1 0.48, ventricle FLAIR 0.65, burden FLAIR 0.43
+         against c10_e500_s42: ventricle T1 0.72, burden T1 0.48, ventricle FLAIR 0.65, burden FLAIR 0.43
+  RULE: the merged code holds in 4 of the 8 cells with a holder: fails
+
+-- described: each cell's failing runs merged alone (3 restarts)
+  e500   2 failing runs: holds no   last 0.06/0.03  worst 0.11/0.09
+  e100   3 failing runs: holds no   last 0.36/0.44  worst 0.55/0.54
+  cont   2 failing runs: holds no   last 0.13/0.14  worst 0.15/0.16
+  red    2 failing runs: holds no   last 0.39/0.44  worst 0.58/0.60
+  pca    3 failing runs: holds yes  last 0.41/0.45  worst 0.63/0.63
+  harm   4 failing runs: holds no   last 0.13/0.09  worst 0.14/0.12
+  tau1   5 failing runs: holds no   last -0.02/-0.02  worst -0.01/-0.01
+  proj64 3 failing runs: holds yes  last 0.44/0.46  worst 0.58/0.57
+  aproj64 4 failing runs: holds no   last 0.31/0.25  worst 0.35/0.28
+
+-- described: random subsets of 2 and 3 runs per cell (3 draws each, 2 restarts)
+  2 runs: merged holds in 5/27; subsets with a holder 21/27, of which merged holds in 5
+  3 runs: merged holds in 14/27; subsets with a holder 22/27, of which merged holds in 14
+
+-- described: the ten projector runs (PC and A100) together, and each seed's PC and A100 runs together
+  all ten: holds yes  last 0.61/0.59  worst 0.61/0.60
+  seed 42 (c8_proj64_s42 fails, c8_aproj64_s42 fails): holds no   last 0.12/0.13  worst 0.21/0.19
+  seed  2 (c8_proj64_s2 fails, c8_aproj64_s2 holds): holds yes  last 0.52/0.52  worst 0.57/0.57
+  seed  3 (c8_proj64_s3 holds, c8_aproj64_s3 fails): holds no   last 0.20/0.22  worst 0.22/0.25
+  seed  4 (c8_proj64_s4 fails, c8_aproj64_s4 fails): holds no   last 0.13/0.17  worst 0.58/0.56
+  seed  5 (c8_proj64_s5 holds, c8_aproj64_s5 fails): holds yes  last 0.51/0.49  worst 0.52/0.51
+
+== B. Leftover past the code: per code and view, the GAP minus a kernel ridge map from the code; CCA between
+   the views' leftovers (fitted on training subjects, read on test subjects). rho1: the top direction's
+   held-out correlation. Repair: the code without its most predictable direction, plus the top leftover.
+  c8_e500_s42     fails  rho1 0.59 rho2 0.46  top reads burden 0.15 / burden 0.15  repaired: holds no   last 0.30/0.27  worst 0.32/0.29
+                  removed direction: predictable 1.00, from the factors by boosting 0.98/0.98, from brain alone 0.78/0.77; GAP's own rho1-8 1.00 0.99 0.98 0.96 0.94 0.92 0.88 0.84
+  c8_e500_s2      holds  rho1 0.41 rho2 0.28  top reads sulcal 0.02 / sulcal 0.05  repaired: holds yes  last 0.56/0.55  worst 0.56/0.56
+                  removed direction: predictable 1.00, from the factors by boosting 0.98/0.98, from brain alone 0.79/0.81; GAP's own rho1-8 1.00 0.98 0.97 0.96 0.94 0.92 0.89 0.89
+  c8_e500_s3      holds  rho1 0.41 rho2 0.22  top reads sulcal 0.01 / ventricle 0.01  repaired: holds yes  last 0.50/0.52  worst 0.53/0.54
+                  removed direction: predictable 1.00, from the factors by boosting 0.98/0.99, from brain alone 0.83/0.84; GAP's own rho1-8 1.00 0.99 0.97 0.95 0.96 0.92 0.91 0.88
+  c8_e500_s4      fails  rho1 0.62 rho2 0.39  top reads burden 0.16 / burden 0.13  repaired: holds no   last 0.36/0.31  worst 0.44/0.42
+                  removed direction: predictable 1.00, from the factors by boosting 0.98/0.98, from brain alone 0.80/0.79; GAP's own rho1-8 1.00 0.97 0.96 0.94 0.94 0.92 0.91 0.89
+  c8_e500_s5      holds  rho1 0.30 rho2 0.35  top reads temporal 0.01 / ventricle 0.02  repaired: holds yes  last 0.51/0.58  worst 0.53/0.59
+                  removed direction: predictable 0.99, from the factors by boosting 0.98/0.98, from brain alone 0.72/0.75; GAP's own rho1-8 1.00 0.98 0.97 0.94 0.95 0.92 0.90 0.87
+  c8_e100_s42     fails  rho1 0.58 rho2 0.38  top reads sulcal 0.08 / ventricle 0.07  repaired: holds yes  last 0.53/0.44  worst 0.54/0.46
+                  removed direction: predictable 1.00, from the factors by boosting 0.98/0.98, from brain alone 0.81/0.79; GAP's own rho1-8 1.00 0.99 0.97 0.95 0.96 0.94 0.90 0.88
+  c8_e100_s2      fails  rho1 0.67 rho2 0.43  top reads burden 0.12 / burden 0.11  repaired: holds no   last 0.32/0.30  worst 0.36/0.35
+                  removed direction: predictable 1.00, from the factors by boosting 0.98/0.98, from brain alone 0.77/0.80; GAP's own rho1-8 1.00 0.98 0.96 0.94 0.93 0.91 0.90 0.79
+  c8_e100_s3      holds  rho1 0.36 rho2 0.31  top reads ventricle 0.02 / ventricle 0.02  repaired: holds yes  last 0.51/0.49  worst 0.52/0.51
+                  removed direction: predictable 1.00, from the factors by boosting 0.98/0.97, from brain alone 0.82/0.81; GAP's own rho1-8 1.00 0.98 0.97 0.95 0.95 0.93 0.90 0.89
+  c8_e100_s4      holds  rho1 0.32 rho2 0.26  top reads burden 0.03 / ventricle 0.02  repaired: holds yes  last 0.56/0.50  worst 0.57/0.51
+                  removed direction: predictable 0.98, from the factors by boosting 0.96/0.97, from brain alone 0.79/0.79; GAP's own rho1-8 1.00 0.98 0.97 0.95 0.95 0.93 0.89 0.88
+  c8_e100_s5      fails  rho1 0.58 rho2 0.31  top reads sulcal 0.21 / sulcal 0.21  repaired: holds no   last 0.31/0.29  worst 0.60/0.57
+                  removed direction: predictable 0.99, from the factors by boosting 0.97/0.97, from brain alone 0.79/0.78; GAP's own rho1-8 1.00 0.99 0.98 0.95 0.94 0.91 0.87 0.78
+  c8_cont_s42     fails  rho1 0.67 rho2 0.43  top reads ventricle 0.13 / ventricle 0.10  repaired: holds no   last 0.37/0.32  worst 0.38/0.32
+                  removed direction: predictable 0.99, from the factors by boosting 0.96/0.97, from brain alone 0.75/0.78; GAP's own rho1-8 1.00 0.99 0.98 0.97 0.95 0.93 0.89 0.90
+  c8_cont_s2      holds  rho1 0.34 rho2 0.28  top reads sulcal 0.03 / sulcal 0.02  repaired: holds yes  last 0.59/0.58  worst 0.60/0.59
+                  removed direction: predictable 0.99, from the factors by boosting 0.97/0.97, from brain alone 0.78/0.80; GAP's own rho1-8 1.00 0.98 0.98 0.97 0.95 0.93 0.91 0.91
+  c8_cont_s3      holds  rho1 0.46 rho2 0.29  top reads ventricle 0.01 / sulcal 0.02  repaired: holds yes  last 0.55/0.59  worst 0.57/0.61
+                  removed direction: predictable 1.00, from the factors by boosting 0.98/0.98, from brain alone 0.83/0.83; GAP's own rho1-8 1.00 0.99 0.97 0.96 0.96 0.93 0.92 0.91
+  c8_cont_s4      fails  rho1 0.59 rho2 0.40  top reads burden 0.12 / burden 0.15  repaired: holds no   last 0.32/0.36  worst 0.45/0.48
+                  removed direction: predictable 0.98, from the factors by boosting 0.97/0.97, from brain alone 0.81/0.79; GAP's own rho1-8 1.00 0.97 0.97 0.94 0.95 0.94 0.93 0.90
+  c8_cont_s5      holds  rho1 0.19 rho2 0.27  top reads burden 0.00 / temporal 0.01  repaired: holds yes  last 0.60/0.57  worst 0.61/0.58
+                  removed direction: predictable 0.97, from the factors by boosting 0.96/0.94, from brain alone 0.73/0.69; GAP's own rho1-8 1.00 0.98 0.97 0.96 0.95 0.92 0.90 0.91
+  c8_red_s42      holds  rho1 0.41 rho2 0.37  top reads ventricle 0.01 / ventricle 0.01  repaired: holds yes  last 0.60/0.63  worst 0.61/0.64
+                  removed direction: predictable 0.92, from the factors by boosting 0.95/0.95, from brain alone 0.73/0.71; GAP's own rho1-8 1.00 0.99 0.98 0.96 0.96 0.94 0.92 0.94
+  c8_red_s2       holds  rho1 0.45 rho2 0.38  top reads burden 0.00 / brain 0.01  repaired: holds yes  last 0.63/0.59  worst 0.64/0.63
+                  removed direction: predictable 0.88, from the factors by boosting 0.94/0.95, from brain alone 0.66/0.69; GAP's own rho1-8 1.00 0.99 0.98 0.97 0.96 0.94 0.93 0.92
+  c8_red_s3       fails  rho1 0.66 rho2 0.53  top reads sulcal 0.02 / sulcal 0.04  repaired: holds no   last 0.06/0.05  worst 0.61/0.63
+                  removed direction: predictable 0.19, from the factors by boosting 0.94/0.95, from brain alone 0.57/0.60; GAP's own rho1-8 1.00 0.97 0.98 0.97 0.97 0.95 0.93 0.91
+  c8_red_s4       fails  rho1 0.53 rho2 0.48  top reads ventricle 0.04 / ventricle 0.02  repaired: holds no   last 0.11/0.08  worst 0.32/0.34
+                  removed direction: predictable 0.40, from the factors by boosting 0.90/0.90, from brain alone 0.47/0.51; GAP's own rho1-8 1.00 0.97 0.96 0.95 0.95 0.94 0.93 0.92
+  c8_red_s5       holds  rho1 0.44 rho2 0.28  top reads lr 0.01 / brain 0.01  repaired: holds yes  last 0.65/0.62  worst 0.66/0.64
+                  removed direction: predictable 0.64, from the factors by boosting 0.90/0.89, from brain alone 0.59/0.63; GAP's own rho1-8 1.00 0.99 0.98 0.96 0.94 0.96 0.92 0.94
+  c8_pca_s42      holds  rho1 0.56 rho2 0.51  top reads burden 0.01 / burden 0.02  repaired: holds yes  last 0.53/0.54  worst 0.56/0.56
+                  removed direction: predictable 0.94, from the factors by boosting 0.94/0.95, from brain alone 0.60/0.67; GAP's own rho1-8 1.00 0.99 0.97 0.96 0.95 0.95 0.91 0.90
+  c8_pca_s2       fails  rho1 0.86 rho2 0.55  top reads temporal 0.05 / temporal 0.04  repaired: holds no   last 0.24/0.18  worst 0.53/0.49
+                  removed direction: predictable 0.71, from the factors by boosting 0.95/0.96, from brain alone 0.36/0.39; GAP's own rho1-8 1.00 0.99 0.98 0.97 0.96 0.94 0.93 0.93
+  c8_pca_s3       fails  rho1 0.75 rho2 0.66  top reads ventricle 0.02 / sulcal 0.01  repaired: holds no   last 0.10/0.10  worst 0.60/0.61
+                  removed direction: predictable 0.13, from the factors by boosting 0.93/0.93, from brain alone 0.60/0.61; GAP's own rho1-8 1.00 0.98 0.97 0.97 0.97 0.93 0.94 0.92
+  c8_pca_s4       fails  rho1 0.82 rho2 0.56  top reads temporal 0.15 / temporal 0.14  repaired: holds no   last 0.05/0.07  worst 0.16/0.22
+                  removed direction: predictable 0.71, from the factors by boosting 0.96/0.97, from brain alone 0.79/0.78; GAP's own rho1-8 1.00 0.98 0.96 0.94 0.94 0.94 0.93 0.90
+  c8_pca_s5       holds  rho1 0.56 rho2 0.47  top reads ventricle 0.02 / ventricle 0.02  repaired: holds yes  last 0.52/0.48  worst 0.62/0.59
+                  removed direction: predictable 0.76, from the factors by boosting 0.94/0.94, from brain alone 0.66/0.67; GAP's own rho1-8 1.00 0.99 0.97 0.97 0.96 0.94 0.91 0.89
+  c8_harm_s42     fails  rho1 0.54 rho2 0.29  top reads ventricle 0.16 / burden 0.16  repaired: holds no   last 0.28/0.31  worst 0.29/0.33
+                  removed direction: predictable 0.99, from the factors by boosting 0.98/0.98, from brain alone 0.81/0.82; GAP's own rho1-8 1.00 0.98 0.96 0.95 0.93 0.91 0.87 0.44
+  c8_harm_s2      holds  rho1 0.22 rho2 0.17  top reads burden 0.01 / lr 0.01  repaired: holds yes  last 0.47/0.49  worst 0.48/0.50
+                  removed direction: predictable 0.99, from the factors by boosting 0.98/0.98, from brain alone 0.82/0.83; GAP's own rho1-8 1.00 0.97 0.96 0.95 0.93 0.89 0.85 0.80
+  c8_harm_s3      fails  rho1 0.47 rho2 0.16  top reads sulcal 0.19 / sulcal 0.22  repaired: holds no   last 0.30/0.28  worst 0.51/0.40
+                  removed direction: predictable 0.99, from the factors by boosting 0.96/0.98, from brain alone 0.79/0.82; GAP's own rho1-8 1.00 0.98 0.97 0.94 0.90 0.94 0.84 0.60
+  c8_harm_s4      fails  rho1 0.59 rho2 0.25  top reads burden 0.20 / burden 0.17  repaired: holds no   last 0.37/0.31  worst 0.39/0.33
+                  removed direction: predictable 0.99, from the factors by boosting 0.97/0.97, from brain alone 0.77/0.79; GAP's own rho1-8 1.00 0.98 0.96 0.94 0.93 0.89 0.83 0.76
+  c8_harm_s5      fails  rho1 0.45 rho2 0.23  top reads sulcal 0.11 / sulcal 0.07  repaired: holds yes  last 0.46/0.48  worst 0.50/0.50
+                  removed direction: predictable 0.98, from the factors by boosting 0.97/0.98, from brain alone 0.81/0.81; GAP's own rho1-8 1.00 0.96 0.97 0.92 0.92 0.90 0.85 0.83
+  c8_tau1_s42     fails  rho1 0.80 rho2 0.63  top reads ventricle 0.30 / ventricle 0.28  repaired: holds no   last -0.02/-0.02  worst 0.00/-0.00
+                  removed direction: predictable 1.00, from the factors by boosting 0.97/0.97, from brain alone 0.68/0.66; GAP's own rho1-8 1.00 0.99 0.99 0.97 0.80 0.52 0.79 0.50
+  c8_tau1_s2      fails  rho1 0.79 rho2 0.66  top reads ventricle 0.35 / ventricle 0.29  repaired: holds no   last -0.03/-0.02  worst -0.01/-0.02
+                  removed direction: predictable 1.00, from the factors by boosting 0.94/0.95, from brain alone 0.19/0.23; GAP's own rho1-8 1.00 0.99 0.99 0.96 0.92 0.60 0.59 0.58
+  c8_tau1_s3      fails  rho1 0.75 rho2 0.48  top reads thickness 0.33 / thickness 0.39  repaired: holds no   last -0.02/-0.02  worst -0.01/-0.01
+                  removed direction: predictable 1.00, from the factors by boosting 0.98/0.98, from brain alone 0.52/0.53; GAP's own rho1-8 1.00 1.00 0.98 0.95 0.79 0.51 0.50 0.42
+  c8_tau1_s4      fails  rho1 0.76 rho2 0.61  top reads ventricle 0.35 / sulcal 0.33  repaired: holds no   last -0.02/-0.02  worst -0.02/-0.01
+                  removed direction: predictable 1.00, from the factors by boosting 0.96/0.96, from brain alone 0.26/0.28; GAP's own rho1-8 1.00 1.00 0.99 0.91 0.55 0.52 0.60 0.49
+  c8_tau1_s5      fails  rho1 0.87 rho2 0.70  top reads thickness 0.36 / thickness 0.34  repaired: holds no   last -0.02/-0.02  worst 0.01/-0.01
+                  removed direction: predictable 1.00, from the factors by boosting 0.95/0.97, from brain alone 0.61/0.64; GAP's own rho1-8 1.00 0.99 0.98 0.95 0.85 0.80 0.60 0.40
+  c8_proj64_s42   fails  rho1 0.52 rho2 0.29  top reads burden 0.11 / burden 0.11  repaired: holds no   last 0.27/0.26  worst 0.29/0.28
+                  removed direction: predictable 1.00, from the factors by boosting 0.98/0.98, from brain alone 0.77/0.78; GAP's own rho1-8 1.00 0.99 0.96 0.93 0.91 0.87 0.87 0.82
+  c8_proj64_s2    fails  rho1 0.58 rho2 0.38  top reads burden 0.05 / sulcal 0.07  repaired: holds yes  last 0.41/0.43  worst 0.46/0.47
+                  removed direction: predictable 1.00, from the factors by boosting 0.98/0.98, from brain alone 0.78/0.82; GAP's own rho1-8 1.00 0.98 0.97 0.94 0.93 0.92 0.88 0.80
+  c8_proj64_s3    holds  rho1 0.31 rho2 0.26  top reads lr 0.02 / ventricle 0.01  repaired: holds yes  last 0.57/0.60  worst 0.58/0.62
+                  removed direction: predictable 1.00, from the factors by boosting 0.98/0.99, from brain alone 0.80/0.81; GAP's own rho1-8 1.00 0.97 0.98 0.95 0.95 0.89 0.89 0.84
+  c8_proj64_s4    fails  rho1 0.61 rho2 0.50  top reads sulcal 0.12 / sulcal 0.09  repaired: holds no   last 0.20/0.18  worst 0.54/0.52
+                  removed direction: predictable 1.00, from the factors by boosting 0.98/0.97, from brain alone 0.81/0.81; GAP's own rho1-8 1.00 0.98 0.96 0.94 0.94 0.92 0.91 0.79
+  c8_proj64_s5    holds  rho1 0.34 rho2 0.25  top reads ventricle 0.01 / ventricle 0.02  repaired: holds yes  last 0.54/0.55  worst 0.55/0.56
+                  removed direction: predictable 1.00, from the factors by boosting 0.98/0.98, from brain alone 0.85/0.85; GAP's own rho1-8 1.00 0.98 0.97 0.94 0.93 0.90 0.88 0.81
+  c8_aproj64_s42  fails  rho1 0.70 rho2 0.34  top reads burden 0.22 / burden 0.24  repaired: holds yes  last 0.40/0.42  worst 0.46/0.43
+                  removed direction: predictable 1.00, from the factors by boosting 0.97/0.97, from brain alone 0.80/0.80; GAP's own rho1-8 1.00 0.97 0.97 0.95 0.94 0.87 0.79 0.77
+  c8_aproj64_s2   holds  rho1 0.48 rho2 0.34  top reads burden 0.00 / burden 0.01  repaired: holds yes  last 0.57/0.56  worst 0.59/0.58
+                  removed direction: predictable 1.00, from the factors by boosting 0.98/0.98, from brain alone 0.79/0.80; GAP's own rho1-8 1.00 0.99 0.97 0.95 0.94 0.92 0.90 0.85
+  c8_aproj64_s3   fails  rho1 0.69 rho2 0.41  top reads burden 0.22 / ventricle 0.16  repaired: holds no   last 0.42/0.35  worst 0.44/0.37
+                  removed direction: predictable 1.00, from the factors by boosting 0.95/0.95, from brain alone 0.54/0.54; GAP's own rho1-8 1.00 0.99 0.97 0.94 0.93 0.90 0.86 0.62
+  c8_aproj64_s4   fails  rho1 0.75 rho2 0.49  top reads burden 0.18 / burden 0.19  repaired: holds no   last 0.39/0.42  worst 0.44/0.46
+                  removed direction: predictable 1.00, from the factors by boosting 0.98/0.98, from brain alone 0.84/0.82; GAP's own rho1-8 1.00 0.98 0.96 0.94 0.92 0.94 0.89 0.89
+  c8_aproj64_s5   fails  rho1 0.63 rho2 0.38  top reads ventricle 0.09 / ventricle 0.08  repaired: holds no   last 0.35/0.40  worst 0.39/0.43
+                  removed direction: predictable 1.00, from the factors by boosting 0.98/0.99, from brain alone 0.83/0.83; GAP's own rho1-8 1.00 0.98 0.97 0.94 0.94 0.91 0.88 0.85
+  DETECTOR RULE: AUC of rho1, failures against holders, 0.97 over 28 failures and 17 holders; within-cell pairs on the right side 44/44: works
+  REPAIR RULE (cells but tau1): 4 of 23 failing codes hold after the repair; 0 of 17 holders stop holding: fails
+  described (tau1): 0 of 5 hold after the repair
+
+Saved out/burden_feasibility_20261102/causal/stage73/pool_check.json

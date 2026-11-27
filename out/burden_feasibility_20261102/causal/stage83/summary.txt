@@ -1,0 +1,12 @@
+c8_wproj_s26     holds  last +0.50/+0.43  worst +0.51/+0.44  rho1 0.60
+c8_wproj_s27     fails  last +0.03/+0.02  worst +0.15/+0.13  rho1 0.60
+c8_wproj_s28     fails  last +0.05/+0.02  worst +0.44/+0.39  rho1 0.73
+c8_wproj_s29     fails  last +0.15/+0.14  worst +0.18/+0.18  rho1 0.66
+c8_wproj_s30     fails  last -0.01/-0.01  worst +0.04/+0.03  rho1 0.69
+c8_wproj_s31     fails  last -0.02/-0.02  worst -0.01/+0.01  rho1 0.68
+c8_wproj_s32     fails  last +0.13/+0.13  worst +0.30/+0.32  rho1 0.59
+c8_wproj_s33     fails  last +0.02/+0.02  worst +0.13/+0.15  rho1 0.65
+c8_wproj_s34     holds  last +0.44/+0.42  worst +0.46/+0.43  rho1 0.46
+c8_wproj_s35     fails  last -0.01/-0.01  worst +0.01/+0.01  rho1 0.63
+holds 2 of 10; largest own-view style R2 from the code 0.032
+STAGE 83: fails

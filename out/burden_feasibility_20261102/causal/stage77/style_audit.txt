@@ -1,0 +1,423 @@
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s16
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s16
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s17
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s17
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s18
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s18
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s19
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s19
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s20
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s20
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s21
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s21
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s22
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s22
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s23
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s23
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s24
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s24
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s25
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s25
+== Style in each run's features: R2 of the view's own gain, bias and noise level, and in brackets of the other view's (drawn
+   independently: the null). 5-fold on test subjects; code_boosted by gradient boosting, the rest by ridge. On a gain-off
+   bank gain is never rendered, so its column is a null too.
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s16  step 20000, bank bank_causal_nofield_fixedpos (redrawn with bank.py --causal; content matches)
+                                 gain           bias          noise
+  trained:
+    t1    code          +0.04 (-0.00)  -0.00 (-0.01)  -0.00 (-0.00)
+    t1    code_boosted  -0.01 (-0.12)  -0.08 (-0.17)  -0.15 (-0.14)
+    t1    pooled        +0.62 (-0.00)  +0.23 (-0.01)  +0.28 (-0.00)
+    t1    gap           +0.66 (-0.00)  +0.30 (-0.01)  +0.33 (-0.00)
+    flair code          -0.00 (-0.00)  -0.01 (-0.00)  -0.00 (-0.00)
+    flair code_boosted  -0.07 (-0.14)  -0.13 (-0.14)  -0.09 (-0.14)
+    flair pooled        +0.54 (-0.01)  +0.26 (-0.01)  +0.26 (-0.00)
+    flair gap           +0.59 (-0.00)  +0.31 (-0.00)  +0.28 (-0.00)
+  untrained twin (the floor):
+    t1    code          +0.32 (-0.01)  +0.10 (-0.00)  +0.05 (-0.00)
+    t1    code_boosted  +0.39 (-0.13)  +0.04 (-0.13)  +0.02 (-0.14)
+    t1    pooled        +0.75 (-0.00)  +0.39 (-0.00)  +0.28 (-0.00)
+    t1    gap           +0.73 (-0.00)  +0.34 (-0.00)  +0.26 (-0.00)
+    flair code          +0.23 (-0.00)  +0.11 (-0.01)  +0.06 (+0.00)
+    flair code_boosted  +0.32 (-0.07)  +0.10 (-0.13)  +0.07 (-0.09)
+    flair pooled        +0.72 (-0.01)  +0.39 (-0.00)  +0.28 (-0.01)
+    flair gap           +0.72 (-0.01)  +0.38 (-0.01)  +0.07 (-0.00)
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s17  step 20000, bank bank_causal_nofield_fixedpos (redrawn with bank.py --causal; content matches)
+                                 gain           bias          noise
+  trained:
+    t1    code          -0.00 (-0.00)  -0.01 (-0.00)  -0.01 (-0.00)
+    t1    code_boosted  -0.05 (-0.14)  -0.16 (-0.19)  -0.16 (-0.12)
+    t1    pooled        +0.63 (-0.00)  +0.36 (-0.01)  +0.36 (-0.00)
+    t1    gap           +0.73 (-0.00)  +0.47 (-0.00)  +0.34 (-0.00)
+    flair code          +0.02 (-0.00)  -0.00 (-0.01)  -0.00 (-0.00)
+    flair code_boosted  +0.02 (-0.11)  -0.12 (-0.14)  -0.13 (-0.16)
+    flair pooled        +0.49 (-0.02)  +0.28 (-0.01)  +0.29 (-0.00)
+    flair gap           +0.47 (-0.01)  +0.35 (-0.00)  +0.29 (-0.00)
+  untrained twin (the floor):
+    t1    code          +0.40 (-0.00)  +0.05 (-0.00)  +0.03 (-0.01)
+    t1    code_boosted  +0.46 (-0.14)  +0.05 (-0.20)  +0.02 (-0.13)
+    t1    pooled        +0.77 (-0.00)  +0.36 (-0.00)  +0.30 (-0.00)
+    t1    gap           +0.76 (-0.01)  +0.35 (-0.00)  +0.26 (-0.00)
+    flair code          +0.34 (-0.00)  +0.07 (-0.01)  +0.01 (-0.00)
+    flair code_boosted  +0.46 (-0.17)  +0.04 (-0.18)  -0.05 (-0.11)
+    flair pooled        +0.72 (-0.01)  +0.36 (-0.00)  +0.29 (-0.00)
+    flair gap           +0.70 (-0.01)  +0.35 (-0.00)  +0.21 (-0.00)
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s18  step 20000, bank bank_causal_nofield_fixedpos (redrawn with bank.py --causal; content matches)
+                                 gain           bias          noise
+  trained:
+    t1    code          +0.02 (-0.00)  -0.00 (-0.00)  -0.00 (-0.00)
+    t1    code_boosted  +0.02 (-0.16)  -0.13 (-0.20)  -0.07 (-0.17)
+    t1    pooled        +0.67 (-0.00)  +0.33 (-0.01)  +0.17 (+0.00)
+    t1    gap           +0.65 (-0.00)  +0.40 (-0.00)  +0.26 (-0.00)
+    flair code          -0.01 (-0.00)  -0.00 (-0.00)  +0.00 (-0.00)
+    flair code_boosted  -0.03 (-0.13)  -0.13 (-0.13)  -0.08 (-0.16)
+    flair pooled        +0.61 (-0.01)  +0.24 (-0.01)  +0.33 (-0.00)
+    flair gap           +0.66 (-0.01)  +0.31 (-0.00)  +0.36 (-0.00)
+  untrained twin (the floor):
+    t1    code          +0.39 (-0.00)  +0.09 (-0.01)  +0.04 (-0.00)
+    t1    code_boosted  +0.47 (-0.15)  +0.03 (-0.13)  -0.01 (-0.07)
+    t1    pooled        +0.75 (-0.01)  +0.27 (-0.00)  +0.29 (-0.00)
+    t1    gap           +0.73 (-0.00)  +0.32 (-0.01)  +0.30 (-0.00)
+    flair code          +0.38 (-0.00)  +0.13 (-0.00)  +0.02 (-0.00)
+    flair code_boosted  +0.49 (-0.11)  +0.07 (-0.15)  -0.04 (-0.14)
+    flair pooled        +0.71 (-0.01)  +0.36 (-0.01)  +0.26 (-0.00)
+    flair gap           +0.70 (-0.01)  +0.35 (-0.00)  +0.20 (-0.00)
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s19  step 20000, bank bank_causal_nofield_fixedpos (redrawn with bank.py --causal; content matches)
+                                 gain           bias          noise
+  trained:
+    t1    code          +0.02 (-0.00)  -0.00 (-0.00)  -0.01 (-0.01)
+    t1    code_boosted  +0.07 (-0.14)  -0.12 (-0.16)  -0.09 (-0.13)
+    t1    pooled        +0.66 (-0.00)  +0.34 (-0.01)  +0.23 (-0.00)
+    t1    gap           +0.74 (-0.00)  +0.44 (-0.00)  +0.28 (-0.01)
+    flair code          +0.00 (-0.00)  -0.00 (-0.00)  -0.01 (-0.00)
+    flair code_boosted  -0.10 (-0.15)  -0.09 (-0.15)  -0.14 (-0.12)
+    flair pooled        +0.50 (-0.01)  +0.24 (-0.01)  +0.37 (-0.00)
+    flair gap           +0.59 (-0.01)  +0.36 (-0.00)  +0.36 (-0.00)
+  untrained twin (the floor):
+    t1    code          +0.28 (-0.00)  +0.11 (-0.00)  +0.06 (-0.00)
+    t1    code_boosted  +0.37 (-0.17)  +0.04 (-0.17)  -0.03 (-0.10)
+    t1    pooled        +0.77 (-0.00)  +0.34 (-0.00)  +0.28 (-0.00)
+    t1    gap           +0.76 (-0.00)  +0.37 (-0.00)  +0.31 (-0.00)
+    flair code          +0.17 (-0.00)  +0.11 (-0.01)  +0.09 (-0.01)
+    flair code_boosted  +0.32 (-0.14)  +0.10 (-0.11)  -0.01 (-0.10)
+    flair pooled        +0.70 (-0.01)  +0.38 (-0.00)  +0.28 (-0.01)
+    flair gap           +0.69 (-0.01)  +0.35 (-0.00)  +0.28 (-0.00)
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s20  step 20000, bank bank_causal_nofield_fixedpos (redrawn with bank.py --causal; content matches)
+                                 gain           bias          noise
+  trained:
+    t1    code          -0.01 (-0.00)  -0.00 (-0.00)  -0.01 (-0.00)
+    t1    code_boosted  -0.08 (-0.14)  -0.11 (-0.11)  -0.13 (-0.09)
+    t1    pooled        +0.55 (-0.00)  +0.32 (-0.00)  +0.25 (+0.00)
+    t1    gap           +0.67 (-0.00)  +0.41 (-0.00)  +0.33 (-0.00)
+    flair code          -0.01 (-0.00)  -0.00 (-0.00)  -0.00 (-0.00)
+    flair code_boosted  -0.10 (-0.17)  -0.14 (-0.15)  -0.12 (-0.14)
+    flair pooled        +0.57 (-0.01)  +0.22 (-0.01)  +0.32 (-0.00)
+    flair gap           +0.61 (-0.00)  +0.35 (-0.00)  +0.33 (-0.00)
+  untrained twin (the floor):
+    t1    code          +0.31 (-0.01)  +0.07 (-0.00)  +0.05 (-0.00)
+    t1    code_boosted  +0.42 (-0.19)  +0.01 (-0.11)  +0.02 (-0.16)
+    t1    pooled        +0.76 (-0.00)  +0.38 (-0.00)  +0.28 (-0.00)
+    t1    gap           +0.75 (-0.00)  +0.39 (-0.00)  +0.23 (-0.00)
+    flair code          +0.18 (-0.00)  +0.05 (-0.00)  +0.05 (-0.00)
+    flair code_boosted  +0.36 (-0.14)  +0.03 (-0.15)  +0.02 (-0.13)
+    flair pooled        +0.71 (-0.00)  +0.37 (-0.01)  +0.27 (-0.00)
+    flair gap           +0.72 (-0.01)  +0.38 (-0.00)  +0.12 (-0.00)
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s21  step 20000, bank bank_causal_nofield_fixedpos (redrawn with bank.py --causal; content matches)
+                                 gain           bias          noise
+  trained:
+    t1    code          +0.02 (-0.00)  -0.01 (-0.00)  -0.00 (-0.00)
+    t1    code_boosted  -0.05 (-0.14)  -0.19 (-0.19)  -0.11 (-0.12)
+    t1    pooled        +0.60 (-0.00)  +0.24 (-0.00)  +0.29 (-0.00)
+    t1    gap           +0.71 (-0.00)  +0.35 (-0.00)  +0.36 (-0.00)
+    flair code          +0.03 (-0.00)  -0.00 (-0.00)  -0.00 (-0.00)
+    flair code_boosted  -0.08 (-0.15)  -0.13 (-0.14)  -0.13 (-0.19)
+    flair pooled        +0.51 (-0.01)  +0.28 (-0.01)  +0.32 (-0.00)
+    flair gap           +0.69 (-0.01)  +0.40 (-0.00)  +0.34 (-0.00)
+  untrained twin (the floor):
+    t1    code          +0.09 (-0.00)  +0.04 (-0.00)  +0.06 (-0.00)
+    t1    code_boosted  +0.30 (-0.13)  +0.00 (-0.18)  +0.01 (-0.14)
+    t1    pooled        +0.76 (-0.00)  +0.37 (-0.00)  +0.27 (-0.00)
+    t1    gap           +0.77 (-0.00)  +0.38 (-0.00)  +0.32 (-0.00)
+    flair code          +0.12 (-0.00)  +0.04 (-0.00)  +0.05 (-0.00)
+    flair code_boosted  +0.29 (-0.15)  +0.02 (-0.18)  +0.02 (-0.20)
+    flair pooled        +0.72 (-0.00)  +0.37 (-0.00)  +0.25 (-0.00)
+    flair gap           +0.73 (-0.01)  +0.36 (-0.00)  +0.16 (-0.00)
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s22  step 20000, bank bank_causal_nofield_fixedpos (redrawn with bank.py --causal; content matches)
+                                 gain           bias          noise
+  trained:
+    t1    code          +0.00 (-0.00)  -0.01 (-0.00)  -0.00 (-0.00)
+    t1    code_boosted  -0.03 (-0.14)  -0.12 (-0.15)  -0.12 (-0.13)
+    t1    pooled        +0.69 (-0.00)  +0.43 (-0.01)  +0.23 (-0.00)
+    t1    gap           +0.75 (-0.00)  +0.51 (-0.01)  +0.28 (-0.00)
+    flair code          +0.01 (-0.00)  -0.01 (-0.01)  -0.00 (-0.00)
+    flair code_boosted  -0.07 (-0.12)  -0.16 (-0.15)  -0.12 (-0.18)
+    flair pooled        +0.53 (-0.01)  +0.27 (-0.01)  +0.37 (-0.00)
+    flair gap           +0.60 (-0.01)  +0.32 (-0.01)  +0.35 (-0.00)
+  untrained twin (the floor):
+    t1    code          +0.21 (-0.00)  +0.08 (-0.00)  +0.09 (-0.00)
+    t1    code_boosted  +0.35 (-0.18)  +0.05 (-0.14)  +0.01 (-0.17)
+    t1    pooled        +0.77 (-0.00)  +0.38 (-0.00)  +0.27 (-0.00)
+    t1    gap           +0.77 (-0.00)  +0.38 (-0.00)  +0.30 (-0.00)
+    flair code          +0.29 (-0.00)  +0.14 (-0.00)  +0.06 (-0.00)
+    flair code_boosted  +0.39 (-0.18)  +0.14 (-0.14)  -0.05 (-0.16)
+    flair pooled        +0.71 (-0.00)  +0.38 (-0.00)  +0.26 (-0.00)
+    flair gap           +0.74 (-0.00)  +0.38 (-0.00)  +0.16 (-0.00)
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s23  step 20000, bank bank_causal_nofield_fixedpos (redrawn with bank.py --causal; content matches)
+                                 gain           bias          noise
+  trained:
+    t1    code          +0.05 (-0.00)  -0.01 (-0.00)  -0.01 (-0.00)
+    t1    code_boosted  +0.01 (-0.15)  -0.12 (-0.15)  -0.10 (-0.12)
+    t1    pooled        +0.66 (-0.00)  +0.29 (-0.00)  +0.28 (-0.00)
+    t1    gap           +0.69 (-0.00)  +0.40 (-0.00)  +0.37 (-0.00)
+    flair code          -0.00 (-0.00)  -0.00 (-0.01)  +0.00 (-0.00)
+    flair code_boosted  -0.12 (-0.20)  -0.11 (-0.17)  -0.14 (-0.14)
+    flair pooled        +0.55 (-0.01)  +0.32 (-0.01)  +0.14 (-0.00)
+    flair gap           +0.67 (-0.01)  +0.30 (-0.00)  +0.32 (-0.00)
+  untrained twin (the floor):
+    t1    code          +0.26 (-0.00)  +0.06 (-0.00)  +0.06 (-0.00)
+    t1    code_boosted  +0.41 (-0.19)  +0.04 (-0.14)  -0.01 (-0.08)
+    t1    pooled        +0.75 (-0.01)  +0.33 (-0.00)  +0.25 (-0.00)
+    t1    gap           +0.75 (-0.01)  +0.37 (-0.00)  +0.26 (-0.00)
+    flair code          +0.29 (-0.00)  +0.13 (-0.01)  +0.04 (-0.00)
+    flair code_boosted  +0.37 (-0.13)  +0.14 (-0.19)  -0.03 (-0.12)
+    flair pooled        +0.73 (-0.01)  +0.37 (-0.00)  +0.21 (-0.00)
+    flair gap           +0.72 (-0.01)  +0.38 (-0.00)  +0.16 (-0.00)
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s24  step 20000, bank bank_causal_nofield_fixedpos (redrawn with bank.py --causal; content matches)
+                                 gain           bias          noise
+  trained:
+    t1    code          +0.00 (-0.00)  -0.01 (-0.00)  -0.00 (-0.00)
+    t1    code_boosted  -0.07 (-0.12)  -0.18 (-0.16)  -0.12 (-0.16)
+    t1    pooled        +0.67 (-0.00)  +0.29 (-0.00)  +0.28 (-0.00)
+    t1    gap           +0.72 (-0.00)  +0.48 (-0.01)  +0.33 (-0.00)
+    flair code          +0.01 (-0.00)  -0.01 (-0.01)  -0.00 (-0.00)
+    flair code_boosted  -0.10 (-0.18)  -0.14 (-0.17)  -0.09 (-0.16)
+    flair pooled        +0.44 (-0.01)  +0.28 (-0.01)  +0.26 (-0.00)
+    flair gap           +0.60 (-0.01)  +0.33 (-0.00)  +0.29 (-0.00)
+  untrained twin (the floor):
+    t1    code          +0.23 (-0.00)  +0.08 (-0.00)  +0.02 (-0.00)
+    t1    code_boosted  +0.40 (-0.12)  +0.04 (-0.15)  -0.03 (-0.16)
+    t1    pooled        +0.78 (-0.01)  +0.39 (-0.01)  +0.36 (-0.00)
+    t1    gap           +0.79 (-0.00)  +0.41 (-0.00)  +0.23 (+0.00)
+    flair code          +0.16 (-0.00)  +0.07 (-0.01)  +0.01 (-0.01)
+    flair code_boosted  +0.38 (-0.17)  +0.07 (-0.12)  -0.04 (-0.13)
+    flair pooled        +0.71 (-0.01)  +0.36 (-0.00)  +0.26 (-0.01)
+    flair gap           +0.72 (-0.00)  +0.35 (-0.01)  +0.15 (-0.00)
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_suff1_c8_20k_a100_s25  step 20000, bank bank_causal_nofield_fixedpos (redrawn with bank.py --causal; content matches)
+                                 gain           bias          noise
+  trained:
+    t1    code          -0.00 (-0.00)  -0.00 (-0.00)  +0.03 (-0.00)
+    t1    code_boosted  -0.03 (-0.15)  -0.14 (-0.15)  -0.10 (-0.09)
+    t1    pooled        +0.69 (-0.00)  +0.28 (-0.01)  +0.30 (-0.00)
+    t1    gap           +0.75 (-0.00)  +0.43 (-0.00)  +0.28 (-0.00)
+    flair code          +0.01 (-0.00)  +0.01 (-0.01)  -0.01 (-0.00)
+    flair code_boosted  -0.04 (-0.20)  -0.12 (-0.14)  -0.12 (-0.17)
+    flair pooled        +0.47 (-0.02)  +0.22 (-0.01)  +0.30 (-0.00)
+    flair gap           +0.56 (-0.01)  +0.34 (-0.00)  +0.37 (-0.00)
+  untrained twin (the floor):
+    t1    code          +0.16 (-0.00)  +0.05 (-0.00)  +0.09 (-0.00)
+    t1    code_boosted  +0.30 (-0.16)  -0.06 (-0.13)  +0.05 (-0.12)
+    t1    pooled        +0.76 (-0.00)  +0.35 (-0.01)  +0.29 (-0.00)
+    t1    gap           +0.77 (-0.00)  +0.36 (-0.00)  +0.27 (-0.00)
+    flair code          +0.16 (-0.01)  +0.05 (-0.00)  +0.06 (-0.00)
+    flair code_boosted  +0.35 (-0.15)  +0.04 (-0.13)  -0.10 (-0.11)
+    flair pooled        +0.71 (-0.01)  +0.37 (-0.00)  +0.20 (-0.00)
+    flair gap           +0.71 (-0.01)  +0.37 (-0.01)  +0.19 (-0.00)
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s16  step 20000, bank bank_causal_nofield_fixedpos (redrawn with bank.py --causal; content matches)
+                                 gain           bias          noise
+  trained:
+    t1    code          -0.01 (-0.00)  -0.01 (-0.00)  -0.01 (-0.00)
+    t1    code_boosted  +0.03 (-0.10)  -0.17 (-0.15)  -0.08 (-0.11)
+    t1    pooled        +0.61 (-0.00)  +0.24 (-0.01)  +0.24 (-0.00)
+    t1    gap           +0.61 (-0.00)  +0.36 (-0.00)  +0.31 (-0.00)
+    flair code          +0.01 (-0.00)  -0.01 (-0.01)  -0.00 (-0.00)
+    flair code_boosted  +0.04 (-0.10)  -0.15 (-0.10)  -0.10 (-0.15)
+    flair pooled        +0.60 (-0.01)  +0.27 (-0.00)  +0.27 (-0.00)
+    flair gap           +0.62 (-0.01)  +0.38 (-0.01)  +0.28 (-0.00)
+  untrained twin (the floor):
+    t1    code          +0.32 (-0.01)  +0.10 (-0.00)  +0.05 (-0.00)
+    t1    code_boosted  +0.39 (-0.13)  +0.04 (-0.13)  +0.02 (-0.14)
+    t1    pooled        +0.75 (-0.00)  +0.39 (-0.00)  +0.28 (-0.00)
+    t1    gap           +0.73 (-0.00)  +0.34 (-0.00)  +0.26 (-0.00)
+    flair code          +0.23 (-0.00)  +0.11 (-0.01)  +0.06 (+0.00)
+    flair code_boosted  +0.32 (-0.07)  +0.10 (-0.13)  +0.07 (-0.09)
+    flair pooled        +0.72 (-0.01)  +0.39 (-0.00)  +0.28 (-0.01)
+    flair gap           +0.72 (-0.01)  +0.38 (-0.01)  +0.07 (-0.00)
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s17  step 20000, bank bank_causal_nofield_fixedpos (redrawn with bank.py --causal; content matches)
+                                 gain           bias          noise
+  trained:
+    t1    code          -0.01 (-0.00)  -0.01 (-0.00)  +0.01 (-0.01)
+    t1    code_boosted  +0.00 (-0.13)  -0.12 (-0.13)  -0.06 (-0.14)
+    t1    pooled        +0.59 (-0.00)  +0.25 (-0.01)  +0.14 (-0.00)
+    t1    gap           +0.66 (-0.00)  +0.38 (-0.00)  +0.27 (-0.00)
+    flair code          +0.00 (-0.00)  -0.01 (-0.00)  -0.00 (-0.00)
+    flair code_boosted  -0.03 (-0.15)  -0.13 (-0.11)  -0.07 (-0.17)
+    flair pooled        +0.49 (-0.02)  +0.23 (-0.01)  +0.35 (-0.00)
+    flair gap           +0.57 (-0.01)  +0.31 (-0.01)  +0.33 (-0.00)
+  untrained twin (the floor):
+    t1    code          +0.40 (-0.00)  +0.05 (-0.00)  +0.03 (-0.01)
+    t1    code_boosted  +0.46 (-0.14)  +0.05 (-0.20)  +0.02 (-0.13)
+    t1    pooled        +0.77 (-0.00)  +0.36 (-0.00)  +0.30 (-0.00)
+    t1    gap           +0.76 (-0.01)  +0.35 (-0.00)  +0.26 (-0.00)
+    flair code          +0.34 (-0.00)  +0.07 (-0.01)  +0.01 (-0.00)
+    flair code_boosted  +0.46 (-0.17)  +0.04 (-0.18)  -0.05 (-0.11)
+    flair pooled        +0.72 (-0.01)  +0.36 (-0.00)  +0.29 (-0.00)
+    flair gap           +0.70 (-0.01)  +0.35 (-0.00)  +0.21 (-0.00)
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s18  step 20000, bank bank_causal_nofield_fixedpos (redrawn with bank.py --causal; content matches)
+                                 gain           bias          noise
+  trained:
+    t1    code          -0.01 (-0.00)  -0.00 (-0.01)  -0.00 (-0.01)
+    t1    code_boosted  -0.01 (-0.13)  -0.08 (-0.12)  -0.07 (-0.16)
+    t1    pooled        +0.62 (-0.00)  +0.18 (-0.00)  +0.19 (-0.00)
+    t1    gap           +0.64 (-0.00)  +0.22 (-0.01)  +0.22 (-0.00)
+    flair code          +0.02 (-0.01)  -0.01 (-0.01)  -0.00 (-0.00)
+    flair code_boosted  -0.01 (-0.13)  -0.16 (-0.12)  -0.12 (-0.14)
+    flair pooled        +0.53 (-0.01)  +0.25 (-0.01)  +0.21 (-0.00)
+    flair gap           +0.55 (-0.01)  +0.33 (-0.00)  +0.28 (-0.00)
+  untrained twin (the floor):
+    t1    code          +0.39 (-0.00)  +0.09 (-0.01)  +0.04 (-0.00)
+    t1    code_boosted  +0.47 (-0.15)  +0.03 (-0.13)  -0.01 (-0.07)
+    t1    pooled        +0.75 (-0.01)  +0.27 (-0.00)  +0.29 (-0.00)
+    t1    gap           +0.73 (-0.00)  +0.32 (-0.01)  +0.30 (-0.00)
+    flair code          +0.38 (-0.00)  +0.13 (-0.00)  +0.02 (-0.00)
+    flair code_boosted  +0.49 (-0.11)  +0.07 (-0.15)  -0.04 (-0.14)
+    flair pooled        +0.71 (-0.01)  +0.36 (-0.01)  +0.26 (-0.00)
+    flair gap           +0.70 (-0.01)  +0.35 (-0.00)  +0.20 (-0.00)
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s19  step 20000, bank bank_causal_nofield_fixedpos (redrawn with bank.py --causal; content matches)
+                                 gain           bias          noise
+  trained:
+    t1    code          +0.01 (-0.00)  +0.00 (-0.00)  -0.00 (-0.00)
+    t1    code_boosted  -0.01 (-0.12)  -0.04 (-0.15)  -0.08 (-0.14)
+    t1    pooled        +0.59 (-0.00)  +0.32 (-0.00)  +0.16 (-0.00)
+    t1    gap           +0.65 (-0.00)  +0.35 (-0.01)  +0.26 (-0.01)
+    flair code          +0.02 (-0.00)  +0.00 (-0.01)  -0.00 (-0.01)
+    flair code_boosted  -0.03 (-0.11)  -0.16 (-0.18)  -0.15 (-0.13)
+    flair pooled        +0.55 (-0.01)  +0.14 (-0.01)  +0.27 (-0.00)
+    flair gap           +0.61 (-0.01)  +0.30 (-0.01)  +0.37 (-0.00)
+  untrained twin (the floor):
+    t1    code          +0.28 (-0.00)  +0.11 (-0.00)  +0.06 (-0.00)
+    t1    code_boosted  +0.37 (-0.17)  +0.04 (-0.17)  -0.03 (-0.10)
+    t1    pooled        +0.77 (-0.00)  +0.34 (-0.00)  +0.28 (-0.00)
+    t1    gap           +0.76 (-0.00)  +0.37 (-0.00)  +0.31 (-0.00)
+    flair code          +0.17 (-0.00)  +0.11 (-0.01)  +0.09 (-0.01)
+    flair code_boosted  +0.32 (-0.14)  +0.10 (-0.11)  -0.01 (-0.10)
+    flair pooled        +0.70 (-0.01)  +0.38 (-0.00)  +0.28 (-0.01)
+    flair gap           +0.69 (-0.01)  +0.35 (-0.00)  +0.28 (-0.00)
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s20  step 20000, bank bank_causal_nofield_fixedpos (redrawn with bank.py --causal; content matches)
+                                 gain           bias          noise
+  trained:
+    t1    code          +0.01 (-0.00)  -0.01 (-0.00)  +0.01 (-0.00)
+    t1    code_boosted  -0.01 (-0.13)  -0.08 (-0.14)  -0.03 (-0.11)
+    t1    pooled        +0.61 (-0.00)  +0.24 (-0.00)  +0.21 (-0.00)
+    t1    gap           +0.63 (-0.00)  +0.33 (-0.00)  +0.27 (-0.00)
+    flair code          +0.06 (-0.00)  -0.01 (-0.00)  +0.01 (-0.00)
+    flair code_boosted  +0.01 (-0.15)  -0.08 (-0.11)  -0.12 (-0.11)
+    flair pooled        +0.54 (-0.01)  +0.26 (-0.01)  +0.26 (-0.00)
+    flair gap           +0.53 (-0.02)  +0.28 (-0.01)  +0.27 (-0.00)
+  untrained twin (the floor):
+    t1    code          +0.31 (-0.01)  +0.07 (-0.00)  +0.05 (-0.00)
+    t1    code_boosted  +0.42 (-0.19)  +0.01 (-0.11)  +0.02 (-0.16)
+    t1    pooled        +0.76 (-0.00)  +0.38 (-0.00)  +0.28 (-0.00)
+    t1    gap           +0.75 (-0.00)  +0.39 (-0.00)  +0.23 (-0.00)
+    flair code          +0.18 (-0.00)  +0.05 (-0.00)  +0.05 (-0.00)
+    flair code_boosted  +0.36 (-0.14)  +0.03 (-0.15)  +0.02 (-0.13)
+    flair pooled        +0.71 (-0.00)  +0.37 (-0.01)  +0.27 (-0.00)
+    flair gap           +0.72 (-0.01)  +0.38 (-0.00)  +0.12 (-0.00)
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s21  step 20000, bank bank_causal_nofield_fixedpos (redrawn with bank.py --causal; content matches)
+                                 gain           bias          noise
+  trained:
+    t1    code          +0.01 (-0.00)  -0.01 (-0.00)  -0.00 (-0.01)
+    t1    code_boosted  +0.03 (-0.19)  -0.10 (-0.15)  -0.09 (-0.09)
+    t1    pooled        +0.63 (-0.00)  +0.24 (-0.01)  +0.16 (-0.00)
+    t1    gap           +0.65 (-0.00)  +0.26 (-0.00)  +0.26 (-0.00)
+    flair code          -0.00 (-0.00)  -0.00 (-0.00)  -0.00 (-0.00)
+    flair code_boosted  -0.01 (-0.16)  -0.14 (-0.15)  -0.16 (-0.19)
+    flair pooled        +0.57 (-0.01)  +0.19 (-0.01)  +0.23 (-0.00)
+    flair gap           +0.61 (-0.01)  +0.30 (-0.01)  +0.22 (-0.00)
+  untrained twin (the floor):
+    t1    code          +0.09 (-0.00)  +0.04 (-0.00)  +0.06 (-0.00)
+    t1    code_boosted  +0.30 (-0.13)  +0.00 (-0.18)  +0.01 (-0.14)
+    t1    pooled        +0.76 (-0.00)  +0.37 (-0.00)  +0.27 (-0.00)
+    t1    gap           +0.77 (-0.00)  +0.38 (-0.00)  +0.32 (-0.00)
+    flair code          +0.12 (-0.00)  +0.04 (-0.00)  +0.05 (-0.00)
+    flair code_boosted  +0.29 (-0.15)  +0.02 (-0.18)  +0.02 (-0.20)
+    flair pooled        +0.72 (-0.00)  +0.37 (-0.00)  +0.25 (-0.00)
+    flair gap           +0.73 (-0.01)  +0.36 (-0.00)  +0.16 (-0.00)
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s22  step 20000, bank bank_causal_nofield_fixedpos (redrawn with bank.py --causal; content matches)
+                                 gain           bias          noise
+  trained:
+    t1    code          +0.03 (-0.00)  -0.00 (-0.01)  -0.00 (-0.00)
+    t1    code_boosted  +0.01 (-0.15)  -0.10 (-0.16)  -0.06 (-0.14)
+    t1    pooled        +0.65 (-0.00)  +0.21 (-0.00)  +0.13 (-0.00)
+    t1    gap           +0.67 (-0.00)  +0.18 (-0.00)  +0.22 (-0.00)
+    flair code          -0.00 (-0.01)  -0.01 (-0.00)  +0.00 (-0.00)
+    flair code_boosted  -0.16 (-0.13)  -0.15 (-0.12)  -0.07 (-0.12)
+    flair pooled        +0.56 (-0.01)  +0.25 (-0.01)  +0.30 (-0.00)
+    flair gap           +0.63 (-0.01)  +0.33 (-0.00)  +0.33 (-0.00)
+  untrained twin (the floor):
+    t1    code          +0.21 (-0.00)  +0.08 (-0.00)  +0.09 (-0.00)
+    t1    code_boosted  +0.35 (-0.18)  +0.05 (-0.14)  +0.01 (-0.17)
+    t1    pooled        +0.77 (-0.00)  +0.38 (-0.00)  +0.27 (-0.00)
+    t1    gap           +0.77 (-0.00)  +0.38 (-0.00)  +0.30 (-0.00)
+    flair code          +0.29 (-0.00)  +0.14 (-0.00)  +0.06 (-0.00)
+    flair code_boosted  +0.39 (-0.18)  +0.14 (-0.14)  -0.05 (-0.16)
+    flair pooled        +0.71 (-0.00)  +0.38 (-0.00)  +0.26 (-0.00)
+    flair gap           +0.74 (-0.00)  +0.38 (-0.00)  +0.16 (-0.00)
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s23  step 20000, bank bank_causal_nofield_fixedpos (redrawn with bank.py --causal; content matches)
+                                 gain           bias          noise
+  trained:
+    t1    code          +0.01 (-0.00)  -0.01 (-0.00)  -0.00 (-0.00)
+    t1    code_boosted  +0.06 (-0.13)  -0.10 (-0.13)  -0.04 (-0.15)
+    t1    pooled        +0.68 (-0.00)  +0.25 (-0.00)  +0.24 (-0.00)
+    t1    gap           +0.72 (-0.00)  +0.34 (-0.00)  +0.28 (-0.00)
+    flair code          +0.01 (-0.00)  -0.00 (-0.01)  -0.00 (-0.00)
+    flair code_boosted  -0.06 (-0.15)  -0.12 (-0.12)  -0.12 (-0.12)
+    flair pooled        +0.60 (-0.01)  +0.30 (-0.01)  +0.23 (-0.00)
+    flair gap           +0.57 (-0.01)  +0.38 (-0.01)  +0.31 (-0.00)
+  untrained twin (the floor):
+    t1    code          +0.26 (-0.00)  +0.06 (-0.00)  +0.06 (-0.00)
+    t1    code_boosted  +0.41 (-0.19)  +0.04 (-0.14)  -0.01 (-0.08)
+    t1    pooled        +0.75 (-0.01)  +0.33 (-0.00)  +0.25 (-0.00)
+    t1    gap           +0.75 (-0.01)  +0.37 (-0.00)  +0.26 (-0.00)
+    flair code          +0.29 (-0.00)  +0.13 (-0.01)  +0.04 (-0.00)
+    flair code_boosted  +0.37 (-0.13)  +0.14 (-0.19)  -0.03 (-0.12)
+    flair pooled        +0.73 (-0.01)  +0.37 (-0.00)  +0.21 (-0.00)
+    flair gap           +0.72 (-0.01)  +0.38 (-0.00)  +0.16 (-0.00)
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s24  step 20000, bank bank_causal_nofield_fixedpos (redrawn with bank.py --causal; content matches)
+                                 gain           bias          noise
+  trained:
+    t1    code          +0.01 (-0.00)  -0.01 (-0.00)  +0.00 (-0.00)
+    t1    code_boosted  +0.02 (-0.13)  -0.12 (-0.12)  -0.11 (-0.17)
+    t1    pooled        +0.66 (-0.01)  +0.26 (-0.00)  +0.29 (-0.00)
+    t1    gap           +0.65 (-0.00)  +0.32 (-0.00)  +0.30 (-0.00)
+    flair code          +0.02 (-0.01)  -0.01 (-0.01)  -0.00 (-0.00)
+    flair code_boosted  -0.01 (-0.16)  -0.06 (-0.17)  -0.11 (-0.13)
+    flair pooled        +0.60 (-0.01)  +0.31 (-0.01)  +0.21 (-0.00)
+    flair gap           +0.61 (-0.01)  +0.36 (-0.01)  +0.37 (-0.00)
+  untrained twin (the floor):
+    t1    code          +0.23 (-0.00)  +0.08 (-0.00)  +0.02 (-0.00)
+    t1    code_boosted  +0.40 (-0.12)  +0.04 (-0.15)  -0.03 (-0.16)
+    t1    pooled        +0.78 (-0.01)  +0.39 (-0.01)  +0.36 (-0.00)
+    t1    gap           +0.79 (-0.00)  +0.41 (-0.00)  +0.23 (+0.00)
+    flair code          +0.16 (-0.00)  +0.07 (-0.01)  +0.01 (-0.01)
+    flair code_boosted  +0.38 (-0.17)  +0.07 (-0.12)  -0.04 (-0.13)
+    flair pooled        +0.71 (-0.01)  +0.36 (-0.00)  +0.26 (-0.01)
+    flair gap           +0.72 (-0.00)  +0.35 (-0.01)  +0.15 (-0.00)
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_uni_suff1_c8_20k_a100_s25  step 20000, bank bank_causal_nofield_fixedpos (redrawn with bank.py --causal; content matches)
+                                 gain           bias          noise
+  trained:
+    t1    code          +0.01 (-0.00)  -0.00 (-0.00)  +0.00 (-0.00)
+    t1    code_boosted  -0.05 (-0.12)  -0.15 (-0.14)  -0.07 (-0.16)
+    t1    pooled        +0.68 (-0.01)  +0.20 (-0.01)  +0.16 (-0.00)
+    t1    gap           +0.71 (-0.00)  +0.24 (-0.00)  +0.34 (-0.00)
+    flair code          -0.00 (-0.00)  -0.00 (-0.01)  -0.00 (-0.00)
+    flair code_boosted  -0.05 (-0.14)  -0.10 (-0.13)  -0.14 (-0.15)
+    flair pooled        +0.51 (-0.01)  +0.25 (-0.01)  +0.20 (-0.00)
+    flair gap           +0.62 (-0.01)  +0.36 (-0.01)  +0.39 (-0.00)
+  untrained twin (the floor):
+    t1    code          +0.16 (-0.00)  +0.05 (-0.00)  +0.09 (-0.00)
+    t1    code_boosted  +0.30 (-0.16)  -0.06 (-0.13)  +0.05 (-0.12)
+    t1    pooled        +0.76 (-0.00)  +0.35 (-0.01)  +0.29 (-0.00)
+    t1    gap           +0.77 (-0.00)  +0.36 (-0.00)  +0.27 (-0.00)
+    flair code          +0.16 (-0.01)  +0.05 (-0.00)  +0.06 (-0.00)
+    flair code_boosted  +0.35 (-0.15)  +0.04 (-0.13)  -0.10 (-0.11)
+    flair pooled        +0.71 (-0.01)  +0.37 (-0.00)  +0.20 (-0.00)
+    flair gap           +0.71 (-0.01)  +0.37 (-0.01)  +0.19 (-0.00)

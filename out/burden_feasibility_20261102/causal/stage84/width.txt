@@ -1,0 +1,7 @@
+== B. Worst-direction rebuild error (95% bound) of the chart of each 10-unit parent, by chart width
+  s2   parent holds  5: 0.3175 (mean 0.1242)  6: 0.3060 (mean 0.0583)  7: 0.0096 (mean 0.0041)  8: 0.0032 (mean 0.0006)  -> width 7
+  s3   parent holds  5: 0.2745 (mean 0.1443)  6: 0.1720 (mean 0.0648)  7: 0.0327 (mean 0.0135)  8: 0.0168 (mean 0.0035)  -> width 7
+  s4   parent fails  5: 0.2172 (mean 0.1254)  6: 0.0805 (mean 0.0420)  7: 0.0569 (mean 0.0236)  8: 0.0363 (mean 0.0091)  -> width 6
+  s5   parent holds  5: 0.2973 (mean 0.1443)  6: 0.2332 (mean 0.0735)  7: 0.0283 (mean 0.0109)  8: 0.0024 (mean 0.0005)  -> width 7
+  s42  parent holds  5: 0.3444 (mean 0.1376)  6: 0.2700 (mean 0.0673)  7: 0.0279 (mean 0.0077)  8: 0.0020 (mean 0.0005)  -> width 7
+  rule B: width 7 in 4 of 4 holding parents, 6 or fewer in 0: works

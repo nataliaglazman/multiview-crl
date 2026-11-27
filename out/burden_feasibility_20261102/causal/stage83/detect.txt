@@ -1,0 +1,29 @@
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_proj64out16_c8_20k_a100_s26.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_wproj_s26     holds  last 0.50/0.43  worst 0.51/0.44  rho1 0.60 rho2 0.41
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_proj64out16_c8_20k_a100_s27.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_wproj_s27     fails  last 0.03/0.02  worst 0.15/0.13  rho1 0.60 rho2 0.59
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_proj64out16_c8_20k_a100_s28.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_wproj_s28     fails  last 0.05/0.02  worst 0.44/0.39  rho1 0.73 rho2 0.45
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_proj64out16_c8_20k_a100_s29.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_wproj_s29     fails  last 0.15/0.14  worst 0.18/0.18  rho1 0.66 rho2 0.46
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_proj64out16_c8_20k_a100_s30.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_wproj_s30     fails  last -0.01/-0.01  worst 0.04/0.03  rho1 0.69 rho2 0.34
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_proj64out16_c8_20k_a100_s31.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_wproj_s31     fails  last -0.02/-0.02  worst -0.01/0.01  rho1 0.68 rho2 0.26
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_proj64out16_c8_20k_a100_s32.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_wproj_s32     fails  last 0.13/0.13  worst 0.30/0.32  rho1 0.59 rho2 0.51
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_proj64out16_c8_20k_a100_s33.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_wproj_s33     fails  last 0.02/0.02  worst 0.13/0.15  rho1 0.65 rho2 0.48
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_proj64out16_c8_20k_a100_s34.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_wproj_s34     holds  last 0.44/0.42  worst 0.46/0.43  rho1 0.46 rho2 0.39
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_proj64out16_c8_20k_a100_s35.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_wproj_s35     fails  last -0.01/-0.01  worst 0.01/0.01  rho1 0.63 rho2 0.43
+
+  c8_wproj     rho1 by rank (h holds, f fails): 0.46h < 0.59f < 0.60f < 0.60h < 0.63f < 0.65f < 0.66f < 0.68f < 0.69f < 0.73f; pairs right 14/16
+               K = 3: 64 of 120 subsets have a holder; the lowest rho1 holds in 51 of them, a random pick in 24.0
+
+  DETECTOR: AUC 0.88 over 8 failures and 2 holders; within-cell pairs right 14/16 (needed 80%): works
+  SELECTION (K = 3): the lowest rho1 holds in 51 of 64 subsets with a holder (80%; a random pick 37%): unresolved
+  stage 75's ranges as a cut: holders at or under .56 1/2, failures at or over .45 8/8; a cut at .50 classifies 9/10
+
+Saved out/burden_feasibility_20261102/causal/stage83/detect.json
