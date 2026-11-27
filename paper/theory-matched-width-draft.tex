@@ -1,0 +1,320 @@
+% =====================================================================
+% DRAFT section (26 Nov 2026): identifiability at the matched width, why the
+% entropy step fails with finite data, and the chart construction.
+% Use: \input{theory-matched-width-draft} after the Background section of draft.tex.
+% Needs amsmath, amsthm, booktabs, natbib, xcolor (all loaded by draft.tex).
+% The source of every number is in a % comment: items and stages of
+% out/burden_feasibility_20261102/HANDOFF_archive_20261127.md (the full record,
+% both sessions' copies merged); HANDOFF.md beside it summarises them.
+% One new bibliography entry is at the end of this file, commented out.
+% =====================================================================
+\makeatletter
+\@ifundefined{theorem}{\newtheorem{theorem}{Theorem}}{}
+\@ifundefined{proposition}{\newtheorem{proposition}{Proposition}}{}
+\@ifundefined{lemma}{\newtheorem{lemma}{Lemma}}{}
+\makeatother
+\providecommand{\R}{\mathbb{R}}
+\providecommand{\pending}[1]{{\color{red}\textbf{[PENDING: #1]}}}
+\providecommand{\todo}[1]{{\color{blue}\small[TODO: #1]}}
+
+\section{Identifiability at the matched width, and how to reach it}
+\label{sec:theory}
+
+Multiview identifiability results promise that a contrastive code of the right
+width is a one-to-one function of the content the views share. On our benchmark
+that promise is kept in half of the training runs. This section locates the gap
+and closes it. We state the result as two steps, each certifying one half of its
+conclusion (\S\ref{sec:theory-result}); show that the step certifying
+completeness is the one that fails with finite data, and why
+(\S\ref{sec:theory-gap}); give a construction that reaches the theorem's
+conclusion with a certificate that can be checked on held-out data
+(\S\ref{sec:theory-chart}); and state what that certificate does not establish
+(\S\ref{sec:theory-check}).
+
+\subsection{Setting}
+\label{sec:theory-setting}
+
+Each subject has shared content $c \in C \subset \R^{n_c}$ and, for each view
+$v \in \{1, 2\}$ (T1 and FLAIR), a view-specific style $s_v$, drawn
+independently given $c$. The views are $x^{(v)} = f_v(c, s_v)$ with $f_v$
+smooth and injective. On the fixed-position benchmark the content is seven
+anatomical factors (brain volume, ventricle volume, lesion burden, cortical
+thickness, temporal volume, left--right asymmetry and sulcal width), so
+$n_c = 7$; the style is each view's intensity gain, bias and noise level. Each
+view has its own encoder $g_v$, and the two views' codes are compared by the
+cosine, that is, on the unit sphere $S^{d-1}$ of a $d$-unit code. With many
+negatives, InfoNCE at temperature $\tau$ approaches the alignment
+$\mathbb{E}\,\lVert g_1(x^{(1)}) - g_2(x^{(2)}) \rVert^2$ minus the entropy of
+each view's code on the sphere \citep{wang2020alignment,zimmermann2021contrastive}.
+
+\subsection{The multiview result is two certificates}
+\label{sec:theory-result}
+
+\begin{theorem}[informal; \citealp{vonkugelgen2021self,daunhawer2023identifiability,yao2024multiview}]
+\label{thm:block}
+Let $g_1$ and $g_2$ minimise the alignment minus the entropy, with the code's
+sphere of the content's dimension, $d - 1 = n_c$. Then each view's code is
+$g_v(x^{(v)}) = h(c)$ almost surely, for one smooth bijection $h$ of $C$ onto its
+image: the code is a function of the content alone, and the content can be
+recovered from it.
+\end{theorem}
+\todo{state the exact theorem and its assumptions as in \citet{yao2024multiview};
+here both views observe all of the content, so their partial observability
+reduces to the two-view case.}
+
+The proof has two steps, and only the second uses the width.
+\begin{enumerate}
+\item \emph{Alignment certifies ``only''.} At zero alignment loss
+  $g_1(f_1(c, s_1)) = g_2(f_2(c, s_2))$ almost surely. Because $s_1$ and $s_2$
+  vary independently given $c$ (with full support, and the maps smooth), neither
+  side can depend on its style, so both are one function $h(c)$. This holds at
+  any width.
+\item \emph{Maximum entropy at the matched width certifies ``all''.} On
+  $S^{n_c}$ the entropy is maximal only for the uniform density, which is
+  regular. A lemma of \citet{zimmermann2021contrastive} then makes $h$
+  one-to-one: a smooth map between simply connected manifolds of the same
+  dimension that carries a regular density to a regular density is a
+  bijection. \todo{check the lemma's exact statement and number}
+\end{enumerate}
+Under the cosine the matched width is therefore $d = n_c + 1$ units, eight here;
+with an output in $\R^{d}$ rather than on a sphere it would be $n_c$. Above the
+matched width, step 2 has nothing to say: an $n_c$-dimensional image in a
+higher-dimensional sphere has no finite entropy, so for a wide code the theorem
+guarantees only step 1's conclusion.
+
+\subsection{The entropy step fails at the matched width with finite data}
+\label{sec:theory-gap}
+
+The entropy in step 2 is never observed. InfoNCE estimates it from batches of
+subjects at temperature $\tau$, so it penalises codes that crowd subjects
+together at roughly that scale. Consider a code that ignores one direction of
+$C$, the variation of one factor's own part, and bends a curved function of the
+factors it does hold through the dimension this frees. In the population the
+lemma excludes it: its image has dimension $n_c - 1$, a set of measure zero in
+$S^{n_c}$, so its density is singular and its entropy is $-\infty$. At the
+resolution a batch can see, the bent image can be spread as evenly as a code
+that keeps the direction.
+
+Alignment then prefers the curve. A curved function of well-read factors is
+computed identically from both views, while the weakest own part (here in the
+plane of ventricle size and lesion burden, the variation their causes do not
+explain) is determined only partially by each view, so keeping it costs
+alignment. The finite-sample optimum can therefore trade the weakest direction
+for a curve, and nothing in the objective tells the two apart.
+
+The benchmark shows this trade. % HANDOFF items 46, 56, 58, 61, 63, 64
+\begin{itemize}
+\item At the matched width (eight units, 2{,}000 training subjects), the code is
+  complete\footnote{A code is \emph{complete} when every direction of the seven
+  factors' own parts (each factor's variation not explained by its causes) is
+  recovered from it with $R^2 \geq .40$ in both views, the ventricle--burden
+  plane included. \todo{align with the evaluation section's definition}} in 5
+  of 10 training runs that differ only in their seed. % item 61: A100s, seeds 6-15
+  Complete codes spend their eighth direction on a curve; incomplete ones spend
+  two directions on curves and lose an own-part direction, typically read at
+  $R^2$ near zero. % items 46, 56, 58
+\item No code carries style at any width: the gain, bias and noise level of
+  either view read $R^2 = 0.00$ from codes of 4 to 16 units, linearly and by
+  gradient boosting. Step 1 works. % item 63
+\item Wider codes put their extra directions into curves. Past the seventh,
+  every direction is a joint non-linear function of the seven factors (boosted
+  $R^2 \approx .75$) rather than new content, and the codes' intrinsic dimension
+  stays at the factors': $6.36$ for 16-unit codes against $6.37$ for the true
+  factors on the same subjects (TwoNN). % items 63, 64
+\item Nine changes to training at eight units fail to raise the rate: the
+  interval at which code batches are rebuilt, the prediction weight, a
+  compressed start, a harmonic penalty, the temperature, a projector head at the
+  code's width, a wider projector that lets the loss bend the code into sixteen
+  outputs (2 of 10 complete), a term penalising what the views still share
+  beyond the code (0 of 10), and refitting the head on a frozen backbone.
+  % stages 60, 62-64, 70, 71, 71a (item 58); stage 83 (item 69); stage 77 (item 67); stage 80 (item 65)
+\item Training longer helps slowly and not always. With 40{,}000 further steps,
+  three times the usual length, one of two incomplete codes recovered its lost
+  direction (its $R^2$ rose steadily from $.01$ to $.44$), while the other's
+  stayed at zero; 10{,}000 further steps had changed neither. The weakest factor
+  is learned last.
+  % stage 81 (item 70); stage 65 for the 10,000-step continuation
+\end{itemize}
+The content is identifiable at the matched width, but with finite data the
+objective that should find it does not certify completeness.
+
+\subsection{Identify wide, chart narrow}
+\label{sec:theory-chart}
+
+The two certificates can be separated. Step 1 does not need the matched width,
+and completeness can be certified by something other than entropy. We
+therefore (i) train the same objective at a width slightly above the matched
+one, where the curves have room and step 1 still holds, and (ii) bring that code
+down to the content's dimension with a non-linear chart fitted to rebuild it.
+
+\paragraph{Construction (no labels).}
+\begin{enumerate}
+\item Train the encoders at a width $d_w > n_c + 1$ (ten units here). By step 1,
+  $g_v(x^{(v)}) = \varphi(c)$ for a content-only $\varphi$; that $\varphi$ is
+  one-to-one is measured, not guaranteed.
+\item In each view, standardise the code, fit a canonical correlation analysis
+  between the views on training subjects, keep the directions whose agreement
+  on held-out training subjects exceeds $.5$ and a shuffled-pairing null, and
+  whiten them. Write $u^{(v)} \in \R^{k}$ for the result.
+\item Fit an encoder $\psi : \R^{k} \to \R^{m}$ and a decoder
+  $\psi' : \R^{m} \to \R^{k}$ (small MLPs, shared by the views) to minimise
+  $\mathbb{E}\,\lVert \psi'(\psi(u^{(v)})) - u^{(v)} \rVert^2$, with early
+  stopping on held-out training subjects and the best of five restarts. The
+  narrow code is $z^{(v)} = \psi(u^{(v)})$.
+\end{enumerate}
+
+\begin{proposition}[chart]
+\label{prop:chart}
+Let $\varphi : C \to \R^{k}$ be continuous and one-to-one, and let
+$\psi'(\psi(u)) = u$ for every $u \in \varphi(C)$. Then $\psi \circ \varphi$ is
+continuous and one-to-one. If $m = n_c$, it is a homeomorphism of $C$ onto an
+open subset of $\R^{n_c}$, and a diffeomorphism when $\psi$ and $\varphi$ are
+smooth with Jacobians of full rank.
+\end{proposition}
+\begin{proof}
+If $\psi(\varphi(c)) = \psi(\varphi(c'))$, applying $\psi'$ gives
+$\varphi(c) = \varphi(c')$, so $c = c'$. Continuity is inherited. For
+$m = n_c$, a continuous one-to-one map from an open subset of $\R^{n_c}$ into
+$\R^{n_c}$ is open by invariance of domain, hence a homeomorphism onto its
+image.
+\end{proof}
+
+The narrow code is the same function of either view's wide code, so it inherits
+step 1's conclusion, and Proposition~\ref{prop:chart} supplies step 2's.
+Together they give the conclusion of Theorem~\ref{thm:block} at width $n_c$, one
+unit below the cosine's matched width, because the chart's output is not on a
+sphere.
+
+Reconstruction succeeds where entropy did not for two reasons. The chart is
+fitted to content that is already aligned, so keeping the weakest direction
+costs it nothing. And with whitened targets every shared direction counts
+equally, while a curve needs no unit of its own: the decoder rebuilds it from
+the coordinates of the factors it is a function of. Entropy has neither
+property.
+
+\begin{table}[t]
+\centering
+\caption{Charts of wide codes on the fixed-position benchmark. A code counts when
+it is complete. The linear chart (the top principal components of the same
+whitened variates) is the best linear compression of the same width.}
+\label{tab:chart}
+\begin{tabular}{lccc}
+\toprule
+Wide code $\to$ chart & wide codes & non-linear chart & linear chart\\
+\midrule
+10 $\to$ 8 units & 4 of 5 & 4 of 4 & 0 of 4\\
+10 $\to$ 7 units & 4 of 5 & 4 of 4 & 0 of 4\\
+9 $\to$ 8 (code batches every 500 steps) & 3 of 4 & 3 of 3 & 0 of 3\\
+9 $\to$ 8 (code batches every 100 steps) & 1 of 4 & 1 of 1 & 0 of 1\\
+12 $\to$ 8 & 3 of 3 & 2 of 3 & 0 of 3\\
+16 $\to$ 8 & 2 of 3 & 0 of 2 & 0 of 2\\
+\midrule
+Trained at 8 units (reference) & \multicolumn{3}{c}{5 of 10 complete}\\
+\bottomrule
+\end{tabular}
+\end{table}
+% HANDOFF item 66 (stages 82 and 82b); item 61 for the reference row
+
+Wherever its wide code is complete, the chart of a 9- or 10-unit code is
+complete: 8 of 8 at eight units and 4 of 4 at seven (Table~\ref{tab:chart}). Its
+own-part $R^2$ stays within $.05$ of the wide code's (for example ventricle
+$.80 \to .78$ and sulcal width $.74 \to .73$, means over the complete 10-unit
+codes and both views). The linear chart is never complete. The charts also keep
+their wide codes' causal outputs: average treatment effects estimated with a
+smooth learner agree within $.02$, and causal discovery with the code as one
+block node recovers its edges to tabular variables with $F_1$ of $.88$--$.94$,
+against $.88$--$.96$ for the wide codes and $.98$ for the true own parts.
+% item 66, downstream: causal/stage82/tabular_rbf.txt, block_tabular.txt
+
+\subsection{The rebuild check, and what it does not certify}
+\label{sec:theory-check}
+
+Proposition~\ref{prop:chart} needs exact rebuilding on $\varphi(C)$. With finite
+data, the rebuild error measures how far from it a chart is.
+
+\begin{lemma}[rebuild bound]
+\label{lem:rebuild}
+For any $\psi$ and $\psi'$ and every direction $j$ of $u$,
+$\mathbb{E}\,\mathrm{Var}\bigl(u_j \mid \psi(u)\bigr) \le
+\mathbb{E}\,\bigl(u_j - \psi'(\psi(u))_j\bigr)^2$.
+\end{lemma}
+\begin{proof}
+Among all functions of $\psi(u)$, the conditional mean
+$\mathbb{E}[u_j \mid \psi(u)]$ has the smallest mean squared error for $u_j$, and
+$\psi'(\psi(u))_j$ is one of those functions.
+\end{proof}
+
+The share of each whitened shared direction that the narrow code leaves
+undetermined is therefore at most its rebuild error, and exact rebuilding gives
+the proposition's hypothesis. We estimate the error per direction on test
+subjects that neither the canonical analysis, the chart nor its early stopping
+saw, with a 95\% bootstrap upper bound over subjects. For the complete 10-unit
+codes, the worst direction of the 8-unit charts is at most $.017$ (the mean over
+directions at most $.004$), and that of the 7-unit charts at most $.033$.
+% item 66, certificate: causal/stage82/cert_u{7,8}{a,b}.txt
+
+Three properties of the check matter.
+\begin{itemize}
+\item \emph{It is per whitened direction.} An average error, or one in
+  unwhitened units, is dominated by high-variance structure, so a faint factor
+  can be missing entirely while the average error looks excellent. This is why
+  rebuilding the images would be a weak test of whether a faint factor is held.
+\item \emph{It is on held-out subjects.} On the fitting subjects near-perfect
+  rebuilding is cheap: almost any map is one-to-one on a finite set, and a
+  flexible decoder can memorise it.
+\item \emph{It certifies information, not readability, and only for continuous
+  charts.} A one-to-one code can hold a factor in a form a probe cannot read,
+  and without continuity a single real number can encode several factors, so
+  the dimension count in Proposition~\ref{prop:chart} rests on continuity. The
+  own-part readouts check readability directly.
+\end{itemize}
+
+The check does not certify the wide code. It compares the chart with its wide
+code, not the wide code with the content, and a chart cannot add what its wide
+code lacks: the one incomplete 10-unit code is rebuilt to within $.036$, and its
+chart is still incomplete. The construction is therefore as reliable as the wide
+code's completeness, 4 of 5 at ten units. Wider codes chart worse with finite
+data (2 of 3 at twelve units, 0 of 2 at sixteen): every extra curve direction
+counts fully in the whitened target, so the bottleneck again chooses between a
+curve and the weakest factor. A slightly wide code is the right parent. Two
+label-free steps complete the construction: choosing a complete code among
+several wide ones, and setting the chart's width when $n_c$ is unknown, as on
+ADNI.
+
+\paragraph{Choosing a complete wide code without labels.} Every content-only
+code is a function of the content, so a complete code determines every other
+run's code, while a code that misses a part cannot determine one that holds it.
+We therefore train several seeds and score each code by how much of the others'
+shared content it predicts. For a candidate $A$ and a reference $B$, each view
+of $A$ predicts the other view's shared variates of $B$ (so view-specific
+variation cannot count), against $B$'s own view as the ceiling; $q(A \mid B)$ is
+the smallest share, over the directions of $B$'s whitened variates, of what $B$'s
+own view explains that $A$ also explains. A code's score is its minimum $q$ over
+the other seeds, and we keep the code with the highest score. At nine and ten
+units the complete code scores higher in 10 of 10 complete--incomplete pairs,
+where the backbone-leftover criterion of \S\todo{ref} gets 7, and among any
+three seeds the top score is complete in every triple that contains a complete
+code. At eight units 68 of 69 pairs are right. Because the score reads a code
+against other runs' codes rather than against its own backbone, a backbone that
+carries less cannot lower it: the 20 codes of a training variant that degraded
+its backbone, all incomplete, score below every complete reference code.
+% HANDOFF item 68 (stage 84 A); the variant is stage 77 (item 67); rho1 at 9-10 units: item 60
+
+\paragraph{Setting the chart's width without labels.} The rebuild check also
+gives the width. Charting each complete 10-unit code at decreasing widths, the
+worst-direction error (95\% bound) stays at or below $.033$ down to seven units
+and jumps to $.17$--$.31$ at six, where every chart loses an own part (sulcal
+width first). The smallest width at which the chart rebuilds the wide code to
+within $.10$ is therefore $n_c = 7$ for every complete code, with no labels and
+no calibration borrowed from known latents. The one incomplete 10-unit code
+shows no jump at seven and is rebuilt at six units to within $.08$: its shared
+part is one dimension short, as its own parts confirm, so a width one below the
+others is a second sign that a wide code is incomplete.
+% HANDOFF item 68 (stage 84 B): causal/stage84/width.txt
+
+% --- add to the bibliography of draft.tex ---------------------------------
+% \bibitem[Wang and Isola(2020)]{wang2020alignment}
+% T.~Wang and P.~Isola.
+% \newblock Understanding contrastive representation learning through alignment
+% and uniformity on the hypersphere.
+% \newblock \emph{ICML}, 2020.
